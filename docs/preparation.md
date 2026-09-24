@@ -30,13 +30,18 @@ nom de chacun.
 |---|---|---|
 | `https://openproject.example.org/admin/settings/project_custom_fields` | `Client` | visible de tous |
 | même page | `ID Dolibarr` | *Administrateurs uniquement* |
-| `https://openproject.example.org/custom_fields?tab=WorkPackageCustomField` | `ID Dolibarr` | *Administrateurs uniquement*, **cocher tous les types** |
+| `https://openproject.example.org/custom_fields?tab=WorkPackageCustomField` | `ID Dolibarr` | *Administrateurs uniquement*, **activé pour tous les types** (voir ci-dessous) |
 | `https://openproject.example.org/custom_fields?tab=TimeEntryCustomField` | `ID Dolibarr` | *Administrateurs uniquement* |
 
 `Client` se remplit à la main en créant un projet dans OpenProject. On y tape le nom ou le code du
 tiers Dolibarr ; accents et majuscules n'importent pas. Un nom inconnu n'empêche pas la création :
 le projet arrive dans Dolibarr sans client, et une alerte part.
 Les trois `ID Dolibarr` servent au service à reconnaître chaque objet. Ne jamais les modifier à la main.
+Pour les lots, « pour tous les projets » ne suffit pas : le champ doit aussi être **activé pour chaque
+type**, en particulier celui de `OPENPROJECT_TYPE`. *Administration → Lots de travaux → Types →
+(le type) → Configuration du formulaire* : faire glisser `ID Dolibarr` des attributs inactifs vers un
+groupe, puis enregistrer. Sans cela, un lot ne peut pas être créé depuis Dolibarr ; `dolop verifier`
+le signale.
 *Administrateurs uniquement* n'est pas un détail : le service fait confiance à ces champs pour
 relier deux objets, ils ne doivent donc pas être modifiables par n'importe quel utilisateur.
 ↩︎ Chaque champ se supprime depuis la même page.

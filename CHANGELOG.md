@@ -8,8 +8,17 @@ Format [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), numérotation [
 - Tests aussi sous Python 3.14 ; la CI refuse une image dont la version de Python n'est pas
   dans la matrice de tests (une montée de version proposée par Dependabot doit d'abord y entrer).
 
+### Corrections
+- `dolop verifier` contrôle le champ « ID Dolibarr » des lots dans **chaque** projet actif (et non
+  plus le premier seulement) et distingue les deux réglages en cause : champ non activé pour le type
+  (configuration du formulaire du type) ou champ pas « pour tous les projets ».
+- Test de fumée : faux échecs aléatoires supprimés (`docker logs | grep -q` avec `pipefail`), et la
+  sauvegarde n'est plus cherchée avant d'avoir été écrite.
+
 ### Documentation
 - Vérification de la signature de l'image : cosign 3 ou plus récent (la version 2 ne la trouve pas).
+- Préparation : le champ « ID Dolibarr » des lots doit être activé pour chaque type, en plus de
+  « pour tous les projets ».
 
 ## [0.2.0] - 2026-09-24
 

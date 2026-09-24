@@ -106,23 +106,31 @@ def test_jeton_refuse(brancher: Any) -> None:
     assert "DOLIBARR_API_KEY" in texte and "OPENPROJECT_API_KEY" in texte
 
 
-def test_champ_des_lots_controle_dans_chaque_projet(brancher: Any) -> None:
-    """Vécu : champ non coché « pour tous les projets », absent des projets créés par la synchronisation."""
+def _projets(*ids: int) -> tuple[int, dict[str, Any]]:
+    return _liste(*({"id": i, "_type": "Project", "name": f"Projet {i}"} for i in ids))
+
+
+def test_champ_des_lots_absent_du_type_partout(brancher: Any) -> None:
+    """Vécu : champ « pour tous les projets », actif pour Jalon mais pas pour le type utilisé."""
     s = serveur_pret()
-    s.route(
-        "GET",
-        "/api/v3/projects",
-        _liste(
-            {"id": 3, "_type": "Project", "name": "Ancien projet"},
-            {"id": 9, "_type": "Project", "name": "Site vitrine"},
-            {"id": 11, "_type": "Project", "name": "Refonte"},
-        ),
-    )
+    s.route("GET", "/api/v3/projects", _projets(9, 11))
+    for p in (9, 11):
+        s.route("GET", f"/api/v3/work_packages/schemas/{p}-1", (200, {"subject": {"name": "Sujet"}}))
+    brancher(s)
+    texte, tout_bon = rendre(list(verifier(CONFIG_PRETE)))
+    assert not tout_bon
+    assert "Types → « Task » → Configuration du formulaire" in texte
+    assert "Pour tous les projets" not in texte
+
+
+def test_champ_des_lots_absent_de_certains_projets(brancher: Any) -> None:
+    s = serveur_pret()
+    s.route("GET", "/api/v3/projects", _projets(3, 9, 11))
     s.route("GET", "/api/v3/work_packages/schemas/9-1", (200, {"subject": {"name": "Sujet"}}))
     s.route("GET", "/api/v3/work_packages/schemas/11-1", (404, {"message": "introuvable"}))
     brancher(s)
     texte, tout_bon = rendre(list(verifier(CONFIG_PRETE)))
     assert not tout_bon
-    assert "« Pour tous les projets »" in texte
-    assert "« Site vitrine »" in texte and "« Refonte » (type « Task » non activé" in texte
-    assert "Ancien projet" not in texte, "le projet qui a le champ n'est pas cité"
+    assert "« Pour tous les projets » (manquant dans : « Projet 9 »)" in texte
+    assert "type « Task » non activé dans : « Projet 11 »" in texte
+    assert "Projet 3" not in texte, "le projet qui a le champ n'est pas cité"

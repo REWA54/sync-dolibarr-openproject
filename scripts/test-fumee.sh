@@ -15,9 +15,15 @@ nettoyer() {
 }
 trap nettoyer EXIT
 
+# Journal lu en entier AVANT d'y chercher : « docker logs | grep -q » échoue au hasard avec
+# pipefail (grep -q s'arrête à la première ligne trouvée, docker logs reçoit SIGPIPE).
+journal() {
+  docker logs "$nom" 2>&1
+}
+
 echec() {
   echo "ÉCHEC : $*" >&2
-  docker logs "$nom" 2>&1 | tail -20 >&2 || true
+  journal | tail -20 >&2 || true
   exit 1
 }
 
@@ -36,11 +42,13 @@ docker run -d --name "$nom" \
   "$image" >/dev/null
 
 for _ in $(seq 1 30); do
-  docker logs "$nom" 2>&1 | grep -q "cycle 1 : échec" && break
+  # La sauvegarde quotidienne suit le premier cycle : l'attendre évite de la chercher trop tôt.
+  grep -q "base d'état sauvegardée" <<<"$(journal)" && break
   sleep 1
 done
-docker logs "$nom" 2>&1 | grep -q "service .* démarré" || echec "le service n'a pas démarré"
-docker logs "$nom" 2>&1 | grep -q "cycle 1 : échec" || echec "aucun cycle en 30 s"
+grep -q "service .* démarré" <<<"$(journal)" || echec "le service n'a pas démarré"
+grep -q "cycle 1 : échec" <<<"$(journal)" || echec "aucun cycle en 30 s"
+grep -q "base d'état sauvegardée" <<<"$(journal)" || echec "aucune sauvegarde après le premier cycle"
 [ "$(docker inspect -f '{{.State.Running}}' "$nom")" = true ] || echec "le service s'est arrêté après une panne"
 
 if docker exec "$nom" dolop sante; then echec "sonde de santé verte sans aucun cycle réussi"; fi
@@ -53,6 +61,6 @@ docker exec "$nom" dolop rapport >/dev/null || echec "« dolop rapport » en éc
 docker stop -t 60 "$nom" >/dev/null
 code=$(docker inspect -f '{{.State.ExitCode}}' "$nom")
 [ "$code" = 0 ] || echec "arrêt avec le code $code"
-docker logs "$nom" 2>&1 | grep -q "arrêté proprement" || echec "arrêt non propre"
+grep -q "arrêté proprement" <<<"$(journal)" || echec "arrêt non propre"
 
 echo "Test de fumée réussi : $image"

@@ -176,18 +176,14 @@ def _openproject(config: Config) -> Iterator[Point]:
 def _champ_des_lots(o: OpenProject, config: Config) -> Point:
     """Le champ des lots n'apparaît dans le schéma d'un projet que s'il y est actif pour le type utilisé.
 
-    Chaque projet actif est contrôlé : un champ qui n'est pas « pour tous les projets » manque dans
-    ceux créés par la synchronisation, et la création d'un lot y échouerait.
+    Chaque projet actif est contrôlé : sans le champ, la création d'un lot venu de Dolibarr y échoue.
+    Deux réglages OpenProject distincts peuvent manquer : le champ activé pour le type (configuration
+    du formulaire du type), et le champ « pour tous les projets ».
     """
-    libelle = (
-        f"OpenProject : champ « {config.op_champ_ref} » des lots, actif pour le type "
-        f"« {config.op_type_tache} » dans chaque projet"
-    )
-    conseil = (
-        f"Administration → Champs personnalisés → Lots de travaux → « {config.op_champ_ref} » : "
-        "cocher « Pour tous les projets » et tous les types"
-    )
-    manquants: list[str] = []
+    ref, type_ = config.op_champ_ref, config.op_type_tache
+    libelle = f"OpenProject : champ « {ref} » des lots, actif pour le type « {type_} » dans chaque projet"
+    sans_champ: list[str] = []
+    sans_type: list[str] = []
     try:
         type_id = o.type_par_defaut()
         projets = o.projets(actifs=True)
@@ -198,19 +194,36 @@ def _champ_des_lots(o: OpenProject, config: Config) -> Point:
             try:
                 schema = o.http.get(f"/work_packages/schemas/{projet['id']}-{type_id}")
             except Introuvable:
-                manquants.append(f"{nom} (type « {config.op_type_tache} » non activé dans ce projet)")
+                sans_type.append(nom)
                 continue
             if not any(
-                cle.startswith("customField")
-                and isinstance(desc, dict)
-                and cle_nom(desc.get("name")) == cle_nom(config.op_champ_ref)
+                cle.startswith("customField") and isinstance(desc, dict) and cle_nom(desc.get("name")) == cle_nom(ref)
                 for cle, desc in schema.items()
             ):
-                manquants.append(nom)
+                sans_champ.append(nom)
     except ErreurApi as e:
-        return Point(False, libelle, f"{conseil} ({str(e)[:160]})")
-    if manquants:
-        return Point(False, libelle, f"{conseil} — manquant dans : {', '.join(manquants)}")
+        return Point(False, libelle, f"lecture des schémas impossible ({str(e)[:160]})")
+
+    conseils: list[str] = []
+    avec_type = len(projets) - len(sans_type)
+    if sans_champ and len(sans_champ) == avec_type:
+        # Absent partout : le champ n'est pas activé pour ce type (cas vécu), pas un problème de projets.
+        conseils.append(
+            f"le champ n'est activé pour le type « {type_} » dans aucun projet : Administration → Lots de travaux "
+            f"→ Types → « {type_} » → Configuration du formulaire → faire glisser « {ref} » des attributs "
+            "inactifs vers un groupe, puis enregistrer"
+        )
+    elif sans_champ:
+        conseils.append(
+            f"Administration → Champs personnalisés → Lots de travaux → « {ref} » : cocher « Pour tous les "
+            f"projets » (manquant dans : {', '.join(sans_champ)})"
+        )
+    if sans_type:
+        conseils.append(
+            f"type « {type_} » non activé dans : {', '.join(sans_type)} (paramètres du projet → Types de lots)"
+        )
+    if conseils:
+        return Point(False, libelle, " ; ".join(conseils))
     return Point(True, libelle)
 
 
