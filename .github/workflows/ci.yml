@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.12", "3.13"]
+        python: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,6 +119,13 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
+      - name: Python de l'image couvert par les tests
+        # Une mise à jour de l'image de base (Dependabot) ne doit pas faire tourner le service sur
+        # une version de Python que les tests n'ont jamais vue : l'ajouter d'abord à la matrice.
+        run: |
+          version=$(sed -nE 's/^FROM python:([0-9]+\.[0-9]+).*/\1/p' Dockerfile | head -1)
+          grep -qE "^ +python: \[.*\"${version}\"" .github/workflows/ci.yml \
+            || { echo "::error file=Dockerfile::l'image part de Python ${version}, absent de la matrice de tests de ci.yml"; exit 1; }
       - name: Dockerfile (hadolint)
         run: docker run --rm -i hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d < Dockerfile
       - name: Workflows (actionlint)

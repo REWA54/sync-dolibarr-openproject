@@ -9,7 +9,9 @@ from typing import Any
 
 from .adaptateurs import ErreurApi
 from .config import Config
+from .conversions import cle_nom
 from .dolibarr import Dolibarr
+from .http import Introuvable
 from .openproject import OpenProject
 
 # Droits Dolibarr du compte technique : (module, droit, sous-droit, libellé de l'écran Permissions).
@@ -172,20 +174,44 @@ def _openproject(config: Config) -> Iterator[Point]:
 
 
 def _champ_des_lots(o: OpenProject, config: Config) -> Point:
-    """Le champ des lots n'apparaît dans le schéma que s'il est coché pour le type utilisé."""
-    libelle = f"OpenProject : champ « {config.op_champ_ref} » des lots, actif pour le type « {config.op_type_tache} »"
-    conseil = (
-        f"Administration → Champs personnalisés → Lots de travaux → « {config.op_champ_ref} » : cocher tous les types"
+    """Le champ des lots n'apparaît dans le schéma d'un projet que s'il y est actif pour le type utilisé.
+
+    Chaque projet actif est contrôlé : un champ qui n'est pas « pour tous les projets » manque dans
+    ceux créés par la synchronisation, et la création d'un lot y échouerait.
+    """
+    libelle = (
+        f"OpenProject : champ « {config.op_champ_ref} » des lots, actif pour le type "
+        f"« {config.op_type_tache} » dans chaque projet"
     )
+    conseil = (
+        f"Administration → Champs personnalisés → Lots de travaux → « {config.op_champ_ref} » : "
+        "cocher « Pour tous les projets » et tous les types"
+    )
+    manquants: list[str] = []
     try:
-        projets = o.pages("/projects", [{"active": {"operator": "=", "values": ["t"]}}])
-        projets = projets or o.pages("/projects", [{"active": {"operator": "=", "values": ["f"]}}])
+        type_id = o.type_par_defaut()
+        projets = o.projets(actifs=True)
         if not projets:
-            return Point(True, f"{libelle} — invérifiable sans projet, contrôlé à la première création")
-        trouve = o.champ("lot", config.op_champ_ref, str(projets[0]["id"]))
+            return Point(True, f"{libelle} — invérifiable sans projet actif, contrôlé à la première création")
+        for projet in projets:
+            nom = f"« {projet.get('name') or projet['id']} »"
+            try:
+                schema = o.http.get(f"/work_packages/schemas/{projet['id']}-{type_id}")
+            except Introuvable:
+                manquants.append(f"{nom} (type « {config.op_type_tache} » non activé dans ce projet)")
+                continue
+            if not any(
+                cle.startswith("customField")
+                and isinstance(desc, dict)
+                and cle_nom(desc.get("name")) == cle_nom(config.op_champ_ref)
+                for cle, desc in schema.items()
+            ):
+                manquants.append(nom)
     except ErreurApi as e:
         return Point(False, libelle, f"{conseil} ({str(e)[:160]})")
-    return Point(trouve is not None, libelle, conseil)
+    if manquants:
+        return Point(False, libelle, f"{conseil} — manquant dans : {', '.join(manquants)}")
+    return Point(True, libelle)
 
 
 def rendre(points: list[Point]) -> tuple[str, bool]:

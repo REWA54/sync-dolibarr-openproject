@@ -104,3 +104,25 @@ def test_jeton_refuse(brancher: Any) -> None:
     texte, tout_bon = rendre(list(verifier(CONFIG_PRETE)))
     assert not tout_bon
     assert "DOLIBARR_API_KEY" in texte and "OPENPROJECT_API_KEY" in texte
+
+
+def test_champ_des_lots_controle_dans_chaque_projet(brancher: Any) -> None:
+    """Vécu : champ non coché « pour tous les projets », absent des projets créés par la synchronisation."""
+    s = serveur_pret()
+    s.route(
+        "GET",
+        "/api/v3/projects",
+        _liste(
+            {"id": 3, "_type": "Project", "name": "Ancien projet"},
+            {"id": 9, "_type": "Project", "name": "Site vitrine"},
+            {"id": 11, "_type": "Project", "name": "Refonte"},
+        ),
+    )
+    s.route("GET", "/api/v3/work_packages/schemas/9-1", (200, {"subject": {"name": "Sujet"}}))
+    s.route("GET", "/api/v3/work_packages/schemas/11-1", (404, {"message": "introuvable"}))
+    brancher(s)
+    texte, tout_bon = rendre(list(verifier(CONFIG_PRETE)))
+    assert not tout_bon
+    assert "« Pour tous les projets »" in texte
+    assert "« Site vitrine »" in texte and "« Refonte » (type « Task » non activé" in texte
+    assert "Ancien projet" not in texte, "le projet qui a le champ n'est pas cité"

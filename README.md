@@ -174,7 +174,8 @@ Mise à jour, retour arrière, sauvegarde et restauration, alertes, incidents :
 
 Chaque version publiée est une image `ghcr.io/rewa54/sync-dolibarr-openproject:vX.Y.Z`, construite
 par la CI après tous les contrôles, **signée** (Sigstore) et accompagnée de sa provenance et de sa
-nomenclature logicielle (SBOM). Vérifier avant de déployer :
+nomenclature logicielle (SBOM). Vérifier avant de déployer, avec **cosign 3 ou plus récent** (la
+version 2 ne trouve pas la signature ; sans cosign installé : `docker run --rm ghcr.io/sigstore/cosign/cosign:v3.1.3 verify …`) :
 
 ```sh
 cosign verify ghcr.io/rewa54/sync-dolibarr-openproject:v0.2.0 \

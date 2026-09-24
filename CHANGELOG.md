@@ -4,6 +4,13 @@ Format [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), numérotation [
 
 ## [Non publié]
 
+### Chaîne CI/CD
+- Tests aussi sous Python 3.14 ; la CI refuse une image dont la version de Python n'est pas
+  dans la matrice de tests (une montée de version proposée par Dependabot doit d'abord y entrer).
+
+### Documentation
+- Vérification de la signature de l'image : cosign 3 ou plus récent (la version 2 ne la trouve pas).
+
 ## [0.2.0] - 2026-09-24
 
 Audit de sécurité et de résilience : compte rendu dans [`docs/securite.md`](docs/securite.md).
