@@ -1,0 +1,36 @@
+# Exemple de stack (Portainer ou docker compose). Chaque ${…} est une variable à fournir.
+
+services:
+  sync-dolibarr-openproject:
+    # Toujours une étiquette sha-xxxxxxx précise, jamais :latest.
+    # Exemple : ghcr.io/<compte>/sync-dolibarr-openproject:sha-1234567
+    image: ${DOLOP_IMAGE}
+    container_name: sync-dolibarr-openproject
+    restart: unless-stopped
+    # Laisse le cycle en cours se terminer avant l'arrêt.
+    stop_grace_period: 60s
+    mem_limit: 256m
+    environment:
+      TZ: ${DOLOP_FUSEAU:-Europe/Paris}
+      # Accès internes par un réseau Docker partagé avec Dolibarr et OpenProject : aucun port publié.
+      DOLIBARR_URL: ${DOLOP_DOLIBARR_URL:-http://dolibarr}
+      DOLIBARR_API_KEY: ${DOLOP_DOLIBARR_API_KEY}
+      OPENPROJECT_URL: ${DOLOP_OPENPROJECT_URL:-http://openproject-proxy}
+      # Nom public d'OpenProject : obligatoire quand on passe par son adresse interne.
+      OPENPROJECT_HOST: ${DOLOP_OPENPROJECT_HOST}
+      OPENPROJECT_API_KEY: ${DOLOP_OPENPROJECT_API_KEY}
+      OPENPROJECT_TYPE: ${DOLOP_OPENPROJECT_TYPE:-Task}
+      ALERTE_WEBHOOK_URL: ${DOLOP_WEBHOOK}
+      # Comptes jamais synchronisés (ni eux ni leurs temps), séparés par des virgules.
+      EXCLURE_LOGINS: ${DOLOP_EXCLURE_LOGINS:-admin}
+      INTERVALLE_SECONDES: "120"
+    volumes:
+      # Dossier de l'hôte, propriété de l'uid 1000.
+      - ${DOLOP_DONNEES}:/data
+    networks:
+      - partage
+
+networks:
+  partage:
+    external: true
+    name: ${DOLOP_RESEAU}
