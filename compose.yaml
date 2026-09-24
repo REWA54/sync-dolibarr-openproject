@@ -1,36 +1,54 @@
-# Exemple de stack (Portainer ou docker compose). Chaque ${…} est une variable à fournir.
+# Exemple de stack (Portainer ou docker compose). Chaque ${…} est une variable à fournir,
+# par exemple dans un fichier .env à côté de ce fichier (voir .env.exemple).
 
 services:
   sync-dolibarr-openproject:
-    # Toujours une étiquette sha-xxxxxxx précise, jamais :latest.
-    # Exemple : ghcr.io/<compte>/sync-dolibarr-openproject:sha-1234567
-    image: ${DOLOP_IMAGE}
+    # Toujours une étiquette précise (vX.Y.Z ou sha-xxxxxxx), jamais :latest.
+    # Exemple : ghcr.io/<compte>/sync-dolibarr-openproject:v0.2.0
+    image: ${DOLOP_IMAGE:?choisir une étiquette précise de l'image}
     container_name: sync-dolibarr-openproject
     restart: unless-stopped
     # Laisse le cycle en cours se terminer avant l'arrêt.
     stop_grace_period: 60s
+
+    # Durcissement : rien à écrire hors de /data, aucun privilège, ressources bornées.
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
     environment:
       TZ: ${DOLOP_FUSEAU:-Europe/Paris}
       # Accès internes par un réseau Docker partagé avec Dolibarr et OpenProject : aucun port publié.
       DOLIBARR_URL: ${DOLOP_DOLIBARR_URL:-http://dolibarr}
-      DOLIBARR_API_KEY: ${DOLOP_DOLIBARR_API_KEY}
+      DOLIBARR_API_KEY: ${DOLOP_DOLIBARR_API_KEY:?jeton API Dolibarr}
       OPENPROJECT_URL: ${DOLOP_OPENPROJECT_URL:-http://openproject-proxy}
       # Nom public d'OpenProject : obligatoire quand on passe par son adresse interne.
-      OPENPROJECT_HOST: ${DOLOP_OPENPROJECT_HOST}
-      OPENPROJECT_API_KEY: ${DOLOP_OPENPROJECT_API_KEY}
+      OPENPROJECT_HOST: ${DOLOP_OPENPROJECT_HOST:-}
+      OPENPROJECT_API_KEY: ${DOLOP_OPENPROJECT_API_KEY:?jeton API OpenProject}
       OPENPROJECT_TYPE: ${DOLOP_OPENPROJECT_TYPE:-Task}
-      ALERTE_WEBHOOK_URL: ${DOLOP_WEBHOOK}
+      ALERTE_WEBHOOK_URL: ${DOLOP_WEBHOOK:-}
       # Comptes jamais synchronisés (ni eux ni leurs temps), séparés par des virgules.
       EXCLURE_LOGINS: ${DOLOP_EXCLURE_LOGINS:-admin}
       INTERVALLE_SECONDES: "120"
     volumes:
-      # Dossier de l'hôte, propriété de l'uid 1000.
-      - ${DOLOP_DONNEES}:/data
+      # Dossier de l'hôte, propriété de l'uid 1000 : base d'état et sauvegardes quotidiennes.
+      - ${DOLOP_DONNEES:?dossier de l'hôte pour /data}:/data
     networks:
       - partage
 
 networks:
   partage:
     external: true
-    name: ${DOLOP_RESEAU}
+    name: ${DOLOP_RESEAU:?réseau Docker partagé avec Dolibarr et OpenProject}

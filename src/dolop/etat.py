@@ -3,6 +3,7 @@
 Perdre cette base ne crée pas de doublons : les identifiants sont aussi embarqués dans les objets
 (attribut supplémentaire Dolibarr, champ personnalisé OpenProject) et les liens se reconstituent
 au cycle suivant. On perd seulement les instantanés, donc la mémoire de « qui a changé quoi ».
+D'où les sauvegardes quotidiennes, faites à chaud par l'API de sauvegarde de SQLite.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,21 @@ def _maintenant() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+# Une requête écrite en entier par côté : aucun texte n'est jamais assemblé dans du SQL.
+_LIEN_PAR_ID: dict[Cote, str] = {
+    "dol": "SELECT * FROM liens WHERE type = ? AND dol_id = ?",
+    "op": "SELECT * FROM liens WHERE type = ? AND op_id = ?",
+}
+_CHANGER_ID: dict[Cote, str] = {
+    "dol": "UPDATE liens SET dol_id = ?, maj_le = ? WHERE id = ?",
+    "op": "UPDATE liens SET op_id = ?, maj_le = ? WHERE id = ?",
+}
+
+
+class BaseIllisible(Exception):
+    """La base d'état est absente ou endommagée."""
+
+
 def _json(v: Any) -> str | None:
     return None if v is None else json.dumps(v, ensure_ascii=False, sort_keys=True, default=str)
 
@@ -92,21 +108,72 @@ def _lire_json(v: str | None) -> Any:
 
 
 class Etat:
-    def __init__(self, connexion: sqlite3.Connection):
+    def __init__(self, connexion: sqlite3.Connection, *, schema: bool = True):
         self.cx = connexion
         self.cx.row_factory = sqlite3.Row
-        self.cx.executescript(_SCHEMA)
-        self.cx.commit()
+        if schema:
+            self.cx.executescript(_SCHEMA)
+            self.cx.commit()
 
     @classmethod
     def ouvrir(cls, chemin: str | Path) -> Etat:
         chemin = Path(chemin)
         chemin.parent.mkdir(parents=True, exist_ok=True)
-        cx = sqlite3.connect(chemin, isolation_level=None)
-        cx.execute("PRAGMA journal_mode=WAL")
-        cx.execute("PRAGMA synchronous=FULL")
-        cx.execute("PRAGMA foreign_keys=ON")
-        return cls(cx)
+        # timeout : une lecture concurrente (« dolop rapport ») fait attendre, jamais échouer.
+        cx = sqlite3.connect(chemin, isolation_level=None, timeout=30)
+        try:
+            cx.execute("PRAGMA journal_mode=WAL")
+            cx.execute("PRAGMA synchronous=FULL")
+            cx.execute("PRAGMA foreign_keys=ON")
+            return cls(cx)
+        except sqlite3.DatabaseError as e:
+            cx.close()
+            raise BaseIllisible(f"base d'état illisible ({chemin}) : {e}") from e
+
+    @classmethod
+    def lire_seulement(cls, chemin: str | Path) -> Etat:
+        """Pour « sante » et « rapport » : aucune écriture, pas même le schéma."""
+        chemin = Path(chemin)
+        if not chemin.exists():
+            raise BaseIllisible(f"base d'état absente : {chemin}")
+        cx = sqlite3.connect(f"{chemin.resolve().as_uri()}?mode=ro", uri=True, isolation_level=None, timeout=30)
+        return cls(cx, schema=False)
+
+    def fermer(self) -> None:
+        self.cx.close()
+
+    def __enter__(self) -> Etat:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.fermer()
+
+    def verifier_integrite(self) -> None:
+        try:
+            resultat = [r[0] for r in self.cx.execute("PRAGMA quick_check").fetchall()]
+        except sqlite3.DatabaseError as e:
+            raise BaseIllisible(f"base d'état endommagée : {e}") from e
+        if resultat != ["ok"]:
+            raise BaseIllisible("base d'état endommagée : " + " ; ".join(map(str, resultat[:5])))
+
+    def sauvegarder(self, destination: str | Path) -> Path:
+        """Copie cohérente de la base, faite à chaud (un cycle peut tourner en même temps)."""
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        provisoire = destination.with_name(destination.name + ".partiel")
+        cible = sqlite3.connect(provisoire)
+        try:
+            self.cx.backup(cible)
+        finally:
+            cible.close()
+        provisoire.replace(destination)  # atomique : jamais de sauvegarde à moitié écrite
+        return destination
+
+    def purger(self, conservation: timedelta) -> int:
+        """Oublie les cycles (et leur journal) plus anciens que ``conservation``. Renvoie leur nombre."""
+        limite = (datetime.now(UTC) - conservation).isoformat(timespec="seconds")
+        self.cx.execute("DELETE FROM journal WHERE cycle IN (SELECT id FROM cycles WHERE debut < ?)", (limite,))
+        return self.cx.execute("DELETE FROM cycles WHERE debut < ?", (limite,)).rowcount
 
     @classmethod
     def en_memoire(cls) -> Etat:
@@ -155,8 +222,7 @@ class Etat:
         return None if row is None else self._lien(row)
 
     def lien_par_id(self, type_: str, cote: Cote, identifiant: str) -> Lien | None:
-        colonne = "dol_id" if cote == "dol" else "op_id"
-        row = self.cx.execute(f"SELECT * FROM liens WHERE type = ? AND {colonne} = ?", (type_, identifiant)).fetchone()
+        row = self.cx.execute(_LIEN_PAR_ID[cote], (type_, identifiant)).fetchone()
         return None if row is None else self._lien(row)
 
     def creer_lien(
@@ -182,8 +248,7 @@ class Etat:
         )
 
     def changer_id(self, lien_id: int, cote: Cote, nouvel_id: str) -> None:
-        colonne = "dol_id" if cote == "dol" else "op_id"
-        self.cx.execute(f"UPDATE liens SET {colonne} = ?, maj_le = ? WHERE id = ?", (nouvel_id, _maintenant(), lien_id))
+        self.cx.execute(_CHANGER_ID[cote], (nouvel_id, _maintenant(), lien_id))
 
     def rompre(self, lien_id: int) -> None:
         self.cx.execute("UPDATE liens SET rompu = 1, maj_le = ? WHERE id = ?", (_maintenant(), lien_id))

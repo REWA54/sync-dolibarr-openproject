@@ -136,6 +136,12 @@ class _Moteur:
                 # le jumeau ne désigne personne d'autre. Sinon, c'est un nouvel objet.
                 if jumeau is None or jumeau.ref_autre not in (None, objet.id):
                     continue
+                # L'attribut Dolibarr est modifiable par tout utilisateur qui édite le projet ; le champ
+                # OpenProject est réservé aux administrateurs. Un identifiant que seul Dolibarr affirme
+                # (erreur de saisie, malveillance) doit donc aussi désigner un objet de même identité.
+                # Les créations interrompues, elles, sont reprises plus bas grâce au registre « en cours ».
+                if cote == "dol" and jumeau.ref_autre is None and not self.meme_identite(objet, "dol", jumeau):
+                    continue
                 dol, op = (objet, jumeau) if cote == "dol" else (jumeau, objet)
                 self.apparier(dol, op, "identifiant embarqué")
 

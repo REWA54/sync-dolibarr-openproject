@@ -86,7 +86,14 @@ class Dolibarr:
     def pages(self, chemin: str, **params: Any) -> list[dict[str, Any]]:
         resultat: list[dict[str, Any]] = []
         for page in range(10_000):
-            lot = self.http.get(chemin, limit=100, page=page, **params)
+            try:
+                lot = self.http.get(chemin, limit=100, page=page, **params)
+            except Introuvable:
+                # Certaines versions répondent 404 à une page vide. Sur la première page, ce serait
+                # une adresse fausse : on laisse l'erreur remonter plutôt que de croire la liste vide.
+                if page == 0:
+                    raise
+                return resultat
             if isinstance(lot, dict):
                 lot = lot.get("data", [])
             if not isinstance(lot, list):

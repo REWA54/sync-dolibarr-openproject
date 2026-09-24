@@ -6,6 +6,7 @@ dolop une-fois [--confirmer-suppressions]  un cycle réel
 dolop service                          un cycle toutes les INTERVALLE_SECONDES
 dolop rapport                          liens, derniers cycles, alertes en cours
 dolop annuler <cycle> [--oui]          supprimer ce qu'un cycle a créé (montre d'abord)
+dolop sauvegarder [fichier]            copie cohérente de la base d'état, même pendant un cycle
 dolop sante                            code 0 si un cycle a réussi il y a moins de 15 min
 """
 
@@ -15,26 +16,35 @@ import argparse
 import contextlib
 import json
 import logging
+import os
 import signal
+import sqlite3
 import sys
 import threading
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import Any
 
 from .adaptateurs import Adaptateur
-from .alertes import Alertes, envoi_webhook
+from .alertes import TITRE, Alertes, envoi_webhook
 from .config import Config, ErreurConfig
 from .conversions import age
 from .cycle import Contexte, Resultat, executer_cycle
 from .dolibarr import Dolibarr
 from .dolibarr import adaptateurs as adaptateurs_dol
-from .etat import Etat
+from .etat import BaseIllisible, Etat
 from .http import Introuvable
 from .modele import NOM_COTE, Cote, autre
 from .openproject import OpenProject
 from .openproject import adaptateurs as adaptateurs_op
 from .verification import rendre, verifier
+from .verrou import DejaEnCours, verrou
 
 log = logging.getLogger("dolop")
+
+# Un cycle lancé à la main attend au plus ce temps que celui du service se termine.
+ATTENTE_CYCLE = 300.0
 
 
 def construire(config: Config) -> Contexte:
@@ -86,14 +96,15 @@ def _alertes(config: Config, etat: Etat) -> Alertes:
 
 
 def cmd_une_fois(config: Config, etat: Etat, confirmer: bool) -> int:
-    r = executer_cycle(
-        construire(config),
-        etat,
-        _alertes(config, etat),
-        mode="une-fois",
-        confirmer_suppressions=confirmer,
-        echo=print,
-    )
+    with verrou(config.verrou, attente=ATTENTE_CYCLE):
+        r = executer_cycle(
+            construire(config),
+            etat,
+            _alertes(config, etat),
+            mode="une-fois",
+            confirmer_suppressions=confirmer,
+            echo=print,
+        )
     afficher(r)
     return 0 if r.statut == "réussi" and not r.bilan.erreurs else 1
 
@@ -102,16 +113,62 @@ def cmd_service(config: Config, etat: Etat) -> int:
     arret = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: arret.set())
+    try:
+        etat.verifier_integrite()
+    except BaseIllisible as e:
+        _alerter_sans_base(config, f"Le service ne démarre pas : {e}. Restaurer la dernière sauvegarde.")
+        raise
     ctx = construire(config)
     alertes = _alertes(config, etat)
-    log.info("service démarré : un cycle toutes les %s s", config.intervalle)
+    log.info("service %s démarré : un cycle toutes les %s s", _version(), config.intervalle)
     while not arret.is_set():
-        r = executer_cycle(ctx, etat, alertes, mode="service")
-        resume = {k: v for k, v in r.bilan.resume().items() if v}
-        log.info("cycle %s : %s %s %s", r.cycle, r.statut, json.dumps(resume, ensure_ascii=False), r.message)
+        # Rien ne doit arrêter la boucle : une erreur imprévue est journalisée et le cycle suivant
+        # repart de zéro. Si elle se répète, « dolop sante » passe au rouge au bout de 15 minutes.
+        try:
+            with verrou(config.verrou, attente=config.intervalle):
+                r = executer_cycle(ctx, etat, alertes, mode="service")
+            resume = {k: v for k, v in r.bilan.resume().items() if v}
+            log.info("cycle %s : %s %s %s", r.cycle, r.statut, json.dumps(resume, ensure_ascii=False), r.message)
+            entretenir(config, etat, alertes)
+        except DejaEnCours as e:
+            log.warning("cycle sauté : %s", e)
+        except Exception:
+            log.exception("erreur hors cycle, nouvel essai au prochain tour")
         arret.wait(config.intervalle)
     log.info("service arrêté proprement")
     return 0
+
+
+def _alerter_sans_base(config: Config, message: str) -> None:
+    """Alerte envoyée directement : la base, qui mémorise les alertes, est justement hors d'usage."""
+    log.critical(message)
+    if config.webhook:
+        with contextlib.suppress(Exception):
+            envoi_webhook(config.webhook)(TITRE, message)
+
+
+def entretenir(config: Config, etat: Etat, alertes: Alertes) -> None:
+    """Une fois par jour : sauvegarde de la base d'état, puis purge du vieil historique."""
+    derniere = etat.meta("derniere_sauvegarde")
+    if derniere and age(datetime.fromisoformat(derniere)) < timedelta(days=1):
+        return
+    try:
+        if config.sauvegardes > 0:
+            horodatage = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+            chemin = etat.sauvegarder(config.dossier_sauvegardes / f"etat-{horodatage}.sqlite")
+            anciennes = sorted(config.dossier_sauvegardes.glob("etat-*.sqlite"))[: -config.sauvegardes]
+            for ancienne in anciennes:
+                ancienne.unlink(missing_ok=True)
+            log.info("base d'état sauvegardée : %s (%s gardées)", chemin, config.sauvegardes)
+        purges = etat.purger(timedelta(days=config.conservation_jours))
+        if purges:
+            log.info("historique : %s cycles de plus de %s jours oubliés", purges, config.conservation_jours)
+        etat.poser_meta("derniere_sauvegarde", datetime.now(UTC).isoformat(timespec="seconds"))
+    except Exception as e:
+        log.exception("sauvegarde de la base d'état impossible")
+        alertes.lever("sauvegarde", f"Sauvegarde quotidienne de la base d'état impossible : {e}", permanente=True)
+        return
+    alertes.retablir("sauvegarde", "La sauvegarde quotidienne de la base d'état fonctionne à nouveau.")
 
 
 def cmd_rapport(etat: Etat) -> int:
@@ -144,6 +201,15 @@ def cmd_annuler(config: Config, etat: Etat, cycle: int, oui: bool) -> int:
     if not creations:
         print(f"Le cycle {cycle} n'a rien créé.")
         return 0
+    if not oui:
+        _annuler(config, etat, cycle, creations, oui=False)
+        return 0
+    with verrou(config.verrou, attente=ATTENTE_CYCLE):
+        _annuler(config, etat, cycle, creations, oui=True)
+    return 0
+
+
+def _annuler(config: Config, etat: Etat, cycle: int, creations: list[Any], *, oui: bool) -> None:
     ctx = construire(config)
     print(("Suppression" if oui else "Serait supprimé (ajouter --oui pour le faire)") + f" — cycle {cycle} :")
     for row in reversed(creations):  # les temps avant leur tâche, les tâches avant leur projet
@@ -164,6 +230,13 @@ def cmd_annuler(config: Config, etat: Etat, cycle: int, oui: bool) -> int:
         lien = etat.lien_par_id(type_, cote, identifiant)
         if lien is not None:
             etat.supprimer_lien(lien.id)
+
+
+def cmd_sauvegarder(config: Config, destination: str | None) -> int:
+    horodatage = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    cible = Path(destination) if destination else config.dossier_sauvegardes / f"etat-{horodatage}.sqlite"
+    with Etat.lire_seulement(config.base) as etat:
+        print(f"Base d'état sauvegardée : {etat.sauvegarder(cible)}")
     return 0
 
 
@@ -175,16 +248,29 @@ def cmd_verifier(config: Config) -> int:
     return 0 if tout_bon else 1
 
 
-def cmd_sante(etat: Etat) -> int:
-    dernier = etat.meta("dernier_succes")
+def cmd_sante(config: Config) -> int:
+    try:
+        with Etat.lire_seulement(config.base) as etat:
+            dernier = etat.meta("dernier_succes")
+    except (BaseIllisible, OSError, sqlite3.Error) as e:
+        print(f"base d'état illisible : {e}")
+        return 1
     if dernier and age(datetime.fromisoformat(dernier)) < timedelta(minutes=15):
         return 0
     print(f"aucun cycle réussi depuis 15 min (dernier : {dernier or 'jamais'})")
     return 1
 
 
+def _version() -> str:
+    try:
+        return version("dolop")
+    except PackageNotFoundError:
+        return "inconnue"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="dolop", description="Synchronisation Dolibarr ↔ OpenProject")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     sous = parser.add_subparsers(dest="commande")
     sous.add_parser("verifier")
     sous.add_parser("simuler")
@@ -195,8 +281,14 @@ def main(argv: list[str] | None = None) -> int:
     ann = sous.add_parser("annuler")
     ann.add_argument("cycle", type=int)
     ann.add_argument("--oui", action="store_true")
+    sauv = sous.add_parser("sauvegarder")
+    sauv.add_argument("destination", nargs="?")
     sous.add_parser("sante")
     args = parser.parse_args(argv)
+
+    # La base d'état, ses sauvegardes et le verrou contiennent des données personnelles
+    # (noms, e-mails, notes) : lisibles par le seul compte du service.
+    os.umask(0o077)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s", stream=sys.stdout)
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -206,20 +298,40 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Configuration : {e}", file=sys.stderr)
         return 2
     commande = args.commande or "simuler"
+    try:
+        return _executer(commande, args, config)
+    except DejaEnCours as e:
+        print(f"Impossible pour l'instant : {e}", file=sys.stderr)
+        return 3
+    except BaseIllisible as e:
+        print(f"{e}. Restaurer la dernière sauvegarde (voir docs/exploitation.md).", file=sys.stderr)
+        return 4
+
+
+def _executer(commande: str, args: argparse.Namespace, config: Config) -> int:
     if commande == "verifier":
         return cmd_verifier(config)
-    etat = Etat.ouvrir(config.base)
-    if commande == "simuler":
-        return cmd_simuler(config, etat)
-    if commande == "une-fois":
-        return cmd_une_fois(config, etat, args.confirmer_suppressions)
-    if commande == "service":
-        return cmd_service(config, etat)
+    if commande == "sante":
+        return cmd_sante(config)
     if commande == "rapport":
-        return cmd_rapport(etat)
-    if commande == "annuler":
+        with Etat.lire_seulement(config.base) as etat:
+            return cmd_rapport(etat)
+    if commande == "sauvegarder":
+        return cmd_sauvegarder(config, args.destination)
+    try:
+        etat = Etat.ouvrir(config.base)
+    except BaseIllisible as e:
+        if commande == "service":
+            _alerter_sans_base(config, f"Le service ne démarre pas : {e}. Restaurer la dernière sauvegarde.")
+        raise
+    with etat:
+        if commande == "simuler":
+            return cmd_simuler(config, etat)
+        if commande == "une-fois":
+            return cmd_une_fois(config, etat, args.confirmer_suppressions)
+        if commande == "service":
+            return cmd_service(config, etat)
         return cmd_annuler(config, etat, args.cycle, args.oui)
-    return cmd_sante(etat)
 
 
 if __name__ == "__main__":

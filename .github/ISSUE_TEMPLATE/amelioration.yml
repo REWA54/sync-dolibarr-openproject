@@ -1,0 +1,20 @@
+name: Amélioration
+description: Proposer une évolution.
+labels: [amélioration]
+body:
+  - type: textarea
+    id: besoin
+    attributes:
+      label: Le besoin
+      description: La situation réelle que cela résoudrait, plutôt que la solution imaginée.
+    validations:
+      required: true
+  - type: textarea
+    id: proposition
+    attributes:
+      label: Proposition
+  - type: textarea
+    id: risques
+    attributes:
+      label: Effets sur les données
+      description: Que se passe-t-il pour les objets déjà synchronisés ? Un garde-fou est-il concerné ?

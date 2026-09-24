@@ -1,10 +1,10 @@
-.venv
-.git
-.github
-tests
+# Seul le nécessaire entre dans le contexte de construction : jamais de secret ni de base d'état.
+*
+!Dockerfile
+!requirements.txt
+!requirements-build.txt
+!pyproject.toml
+!README.md
+!LICENSE
+!src/
 **/__pycache__
-.pytest_cache
-.mypy_cache
-.ruff_cache
-*.sqlite*
-.env

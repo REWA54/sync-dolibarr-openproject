@@ -24,10 +24,20 @@ TITRE = "Synchro Dolibarr ↔ OpenProject"
 Envoi = Callable[[str, str], None]
 
 
-def envoi_webhook(url: str) -> Envoi:
+class ErreurWebhook(Exception):
+    """Échec d'envoi, décrit sans l'adresse du webhook : elle vaut un mot de passe."""
+
+
+def envoi_webhook(url: str, transport: httpx.BaseTransport | None = None) -> Envoi:
+    client = httpx.Client(timeout=10, follow_redirects=False, transport=transport)
+
     def envoyer(titre: str, message: str) -> None:
-        reponse = httpx.post(url, json={"title": titre, "message": message}, timeout=10)
-        reponse.raise_for_status()
+        try:
+            reponse = client.post(url, json={"title": titre, "message": message})
+        except httpx.HTTPError as e:
+            raise ErreurWebhook(f"webhook injoignable ({type(e).__name__})") from None
+        if reponse.status_code >= 400:
+            raise ErreurWebhook(f"le webhook a répondu {reponse.status_code}")
 
     return envoyer
 

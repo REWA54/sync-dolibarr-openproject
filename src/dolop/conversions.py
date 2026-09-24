@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import markdown as _markdown
+import nh3
 from markdownify import markdownify as _markdownify
 
 # ------------------------------------------------------------------------------- durées
@@ -138,9 +139,16 @@ def html_vers_markdown(html: str | None) -> str:
 
 
 def markdown_vers_html(md: str | None) -> str:
+    """Markdown → HTML assaini, prêt à être rangé dans Dolibarr.
+
+    Le Markdown laisse passer le HTML brut et les liens ``javascript:`` : un commentaire ou une
+    description saisis dans OpenProject pourraient sinon glisser du script dans Dolibarr.
+    ``nh3`` ne garde que les balises et adresses sûres (liste d'autorisation, pas de liste noire).
+    """
     if not md or not md.strip():
         return ""
-    return str(_markdown.markdown(md, extensions=["sane_lists", "nl2br"])).strip()
+    html = str(_markdown.markdown(md, extensions=["sane_lists", "nl2br"]))
+    return nh3.clean(html).strip()
 
 
 def texte_simple(valeur: str | None) -> str:

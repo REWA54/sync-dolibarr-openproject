@@ -141,6 +141,8 @@ def executer_cycle(
 
     ecritures = [f"{NOM_COTE[s.cote]:<11} {s.type:<11} {e}" for s in simulateurs for e in s.ecritures]
     ecritures += notes_simulees.ecritures
+    if not ecrire:
+        etat.fermer()  # la copie de simulation
     return Resultat(cycle, statut, bilan, message, ecritures)
 
 
@@ -319,7 +321,7 @@ class _Cycle:
             try:
                 commentaires = source.commentaires(lien.op_id)
                 bloc = rendre_commentaires(commentaires, self.ctx.fuseau)
-                nouvelle = hashlib.sha1(bloc.encode()).hexdigest() if commentaires else None
+                nouvelle = hashlib.sha1(bloc.encode(), usedforsecurity=False).hexdigest() if commentaires else None
                 if nouvelle != empreinte:
                     cible.ecrire_bloc(lien.dol_id, bloc)
                     self.etat.journaliser(

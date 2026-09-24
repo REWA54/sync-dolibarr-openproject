@@ -37,6 +37,8 @@ nom de chacun.
 tiers Dolibarr ; accents et majuscules n'importent pas. Un nom inconnu n'empêche pas la création :
 le projet arrive dans Dolibarr sans client, et une alerte part.
 Les trois `ID Dolibarr` servent au service à reconnaître chaque objet. Ne jamais les modifier à la main.
+*Administrateurs uniquement* n'est pas un détail : le service fait confiance à ces champs pour
+relier deux objets, ils ne doivent donc pas être modifiables par n'importe quel utilisateur.
 ↩︎ Chaque champ se supprime depuis la même page.
 
 ## B. Dolibarr
@@ -48,6 +50,12 @@ Les trois `ID Dolibarr` servent au service à reconnaître chaque objet. Ne jama
 *Nouvel attribut* : libellé `ID OpenProject`, **code `openproject_id`**, type *Chaîne*, non obligatoire.
 Dolibarr n'enregistre pas la référence externe d'un projet reçue par son API : l'identifiant
 OpenProject doit donc vivre dans cet attribut.
+
+Recommandé : **Visibilité `5`** (affiché dans les listes et la fiche, jamais dans les formulaires de
+création ni de modification). Sinon, tout utilisateur qui édite un projet peut changer cet
+identifiant. Le service s'en méfie déjà (un identifiant que seul Dolibarr affirme doit désigner un
+objet de même titre), mais mieux vaut qu'il ne soit pas modifiable. Après ce réglage, vérifier au
+premier cycle qu'un projet créé dans Dolibarr reçoit bien son « ID OpenProject ».
 ↩︎ Supprimable depuis la même page.
 
 **B2. Compte technique.** *Utilisateurs & Groupes → Nouvel utilisateur* : identifiant `sync`,
@@ -62,17 +70,20 @@ modules. Accorder :
 
 ## C. Configuration et vérification
 
-Copier `.env.exemple` en `.env`, y coller les deux jetons, et régler :
-- `EXCLURE_LOGINS` : les comptes administrateurs et le compte technique de chaque outil ;
-- `OPENPROJECT_TYPE` : le nom exact du type de lot à utiliser (« Task » en anglais, « Tache » dans
-  une instance installée en français).
+Copier `compose.env.exemple` en `.env` (déploiement Docker, voir le README) ou `.env.exemple` en
+`.env` (poste de développement), y coller les deux jetons, et régler :
+- les comptes exclus (`EXCLURE_LOGINS`) : les comptes administrateurs et le compte technique de
+  chaque outil ;
+- le type de lot (`OPENPROJECT_TYPE`) : le nom exact du type à utiliser (« Task » en anglais,
+  « Tache » dans une instance installée en français).
 
-Puis :
+Puis, avec Docker (`dolop …` seul depuis un poste de développement) :
 
 ```sh
-dolop verifier   # tout doit être vert (⏳ tant qu'aucun projet actif n'existe dans OpenProject)
-dolop simuler    # ce qui serait fait, sans rien écrire
-dolop une-fois   # premier cycle réel ; « dolop annuler <n°> --oui » le défait
+docker compose run --rm sync-dolibarr-openproject dolop verifier   # tout vert (⏳ tant qu'aucun projet actif n'existe dans OpenProject)
+docker compose run --rm sync-dolibarr-openproject dolop simuler    # ce qui serait fait, sans rien écrire
+docker compose run --rm sync-dolibarr-openproject dolop une-fois   # premier cycle réel ; « dolop annuler <n°> --oui » le défait
+docker compose up -d                                               # puis le service, un cycle toutes les 2 minutes
 ```
 
 Bon à savoir :

@@ -1,0 +1,27 @@
+# Revue des dépendances d'une demande de fusion : refusée si elle introduit une faille connue
+# ou une licence incompatible.
+name: Revue des dépendances
+
+on:
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: dependances-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  revue:
+    name: Nouvelles dépendances
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # lire le manifeste des dépendances
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          deny-licenses: AGPL-3.0-only, AGPL-3.0-or-later, SSPL-1.0

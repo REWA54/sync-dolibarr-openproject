@@ -1,9 +1,30 @@
+# Environnements et caches
 .venv/
 __pycache__/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# Secrets : jamais versionnés
+.env
+.env.*
+!.env.exemple
+*.env
+!compose.env.exemple
+
+# Données du service (données personnelles)
 *.sqlite
 *.sqlite-*
-.env
+*.sqlite.partiel
+*.verrou
+sauvegardes/
+donnees/
+
+# Rapports de la CI
+*.sarif

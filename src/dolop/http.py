@@ -1,8 +1,9 @@
 """Client HTTP commun aux deux outils.
 
-Les lectures sont retentées sur les pannes passagères (connexion, 502/503/504) ; les écritures
-jamais, car une écriture retentée à l'aveugle peut créer un doublon. La reprise des écritures
-interrompues est l'affaire du moteur (créations « en cours » et recherche de jumeau).
+Les lectures sont retentées sur les pannes passagères (connexion, 429, 502/503/504). Une écriture
+ne l'est que si la connexion n'a jamais pu s'établir : la requête n'est alors jamais partie. Au-delà,
+une écriture retentée à l'aveugle peut créer un doublon ; la reprise des écritures interrompues est
+l'affaire du moteur (créations « en cours » et recherche de jumeau).
 """
 
 from __future__ import annotations
@@ -18,7 +19,10 @@ from .adaptateurs import ErreurApi
 
 log = logging.getLogger("dolop.http")
 
-_PASSAGERS = {502, 503, 504}
+_PASSAGERS = {429, 502, 503, 504}
+# Erreurs levées avant l'envoi de la requête : la rejouer ne peut rien écrire deux fois.
+_AVANT_ENVOI = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+_ATTENTE_MAX = 30.0
 
 
 class Introuvable(ErreurApi):
@@ -68,8 +72,7 @@ class ClientHttp:
         corps: Any = None,
     ) -> Any:
         lecture = methode == "GET"
-        tentatives = self.essais if lecture else 1
-        for essai in range(1, tentatives + 1):
+        for essai in range(1, self.essais + 1):
             try:
                 reponse = self.http.request(
                     methode,
@@ -79,14 +82,14 @@ class ClientHttp:
                     headers={"Content-Type": "application/json"} if corps is not None else None,
                 )
             except httpx.TransportError as e:
-                if essai < tentatives:
+                if essai < self.essais and (lecture or isinstance(e, _AVANT_ENVOI)):
                     log.warning("%s %s %s : %s — nouvel essai", self.nom, methode, chemin, e)
                     time.sleep(self.pause * essai)
                     continue
                 raise ErreurApi(f"{self.nom} {methode} {chemin} : injoignable ({e})") from e
-            if reponse.status_code in _PASSAGERS and essai < tentatives:
+            if lecture and reponse.status_code in _PASSAGERS and essai < self.essais:
                 log.warning("%s %s %s → %s — nouvel essai", self.nom, methode, chemin, reponse.status_code)
-                time.sleep(self.pause * essai)
+                time.sleep(self._attente(reponse, essai))
                 continue
             if reponse.status_code >= 400:
                 raise self._erreur(methode, chemin, reponse)
@@ -97,6 +100,14 @@ class ClientHttp:
             except ValueError as e:
                 raise ErreurApi(f"{self.nom} {methode} {chemin} : réponse qui n'est pas du JSON") from e
         raise AssertionError("inatteignable")
+
+    def _attente(self, reponse: httpx.Response, essai: int) -> float:
+        """Pause avant de relire : ``Retry-After`` si le serveur en donne un (plafonné), sinon croissante."""
+        try:
+            demande = float(reponse.headers.get("Retry-After", ""))
+        except ValueError:
+            return self.pause * essai
+        return min(max(demande, 0.0), _ATTENTE_MAX)
 
     def get(self, chemin: str, **params: Any) -> Any:
         return self.requete("GET", chemin, params={k: v for k, v in params.items() if v is not None})

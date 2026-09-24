@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Signaler une faille de sécurité
+    url: https://github.com/REWA54/sync-dolibarr-openproject/security/advisories/new
+    about: En privé, jamais dans une issue publique (voir SECURITY.md).
+  - name: Guide d'installation et d'exploitation
+    url: https://github.com/REWA54/sync-dolibarr-openproject#installation-en-5-%C3%A9tapes
+    about: La plupart des questions y trouvent leur réponse.

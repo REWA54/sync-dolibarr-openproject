@@ -1,0 +1,45 @@
+name: Bogue
+description: Le service ne fait pas ce qu'il devrait.
+labels: [bogue]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Merci ! **Ne collez ni jeton, ni adresse de serveur, ni donnée réelle** (noms de clients, e-mails) :
+        remplacez-les par des valeurs fictives. Une faille de sécurité se signale en privé (SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`dolop --version` ou l'étiquette de l'image"
+      placeholder: v0.2.0
+    validations:
+      required: true
+  - type: input
+    id: outils
+    attributes:
+      label: Versions de Dolibarr et d'OpenProject
+      placeholder: Dolibarr 24.0.0, OpenProject 17.8.0
+    validations:
+      required: true
+  - type: textarea
+    id: situation
+    attributes:
+      label: Ce qui s'est passé
+      description: Ce que vous avez fait, dans quel outil, ce que vous attendiez, ce qui est arrivé.
+    validations:
+      required: true
+  - type: textarea
+    id: sortie
+    attributes:
+      label: Sortie de `dolop rapport` et extrait du journal
+      description: Anonymisés.
+      render: text
+  - type: checkboxes
+    id: controles
+    attributes:
+      label: Vérifications
+      options:
+        - label: "`dolop verifier` est entièrement vert"
+        - label: J'ai retiré toute donnée réelle et tout secret de ce message
+          required: true

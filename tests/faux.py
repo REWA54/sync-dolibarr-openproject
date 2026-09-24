@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import weakref
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -148,6 +149,7 @@ class Banc:
         self.commentaires = FauxCommentaires()
         self.notes = FauxNotes()
         self.etat = Etat.en_memoire()
+        weakref.finalize(self, self.etat.cx.close)  # base fermée quand le banc disparaît
         self.envoyees: list[tuple[str, str]] = []
         self.alertes = Alertes(self.etat, envoi=lambda t, m: self.envoyees.append((t, m)))
 
