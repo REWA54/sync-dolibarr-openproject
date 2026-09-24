@@ -193,6 +193,10 @@ def test_entretien_quotidien_sauvegarde_tourne_et_purge(tmp_path: Path) -> None:
     entretenir(config, etat, alertes)  # moins de 24 h après : rien
     assert len(list(config.dossier_sauvegardes.glob("etat-*.sqlite"))) == 1
 
+    # Trois anciennes sauvegardes seulement : sinon le résultat dépendrait de la seconde à laquelle
+    # la sauvegarde précédente a été faite (même nom écrasé, ou un fichier de plus).
+    for precedente in config.dossier_sauvegardes.glob("etat-*.sqlite"):
+        precedente.unlink()
     for jour in ("20200101", "20200102", "20200103"):
         (config.dossier_sauvegardes / f"etat-{jour}-000000.sqlite").write_bytes(b"")
     etat.poser_meta("derniere_sauvegarde", (datetime.now(UTC) - timedelta(days=2)).isoformat())
