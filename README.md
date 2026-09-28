@@ -55,21 +55,25 @@ Versions éprouvées : **Dolibarr 24.0** et **OpenProject 17.8**.
 
 ```mermaid
 flowchart LR
-    D[(Dolibarr<br>API REST)] <-->|lecture complète<br>puis écarts| S
-    O[(OpenProject<br>API v3)] <-->|lecture complète<br>puis écarts| S
+    D[(Dolibarr<br>API REST)] <-->|modifications,<br>tout chaque heure| S
+    O[(OpenProject<br>API v3)] <-->|modifications,<br>tout chaque heure| S
     S[dolop<br>toutes les 2 min] --- E[(base d'état SQLite<br>liens + instantanés)]
     S -.->|alertes| W[Webhook<br>Home Assistant…]
 ```
 
-À chaque cycle, le service lit **tout**, des deux côtés, puis compare chaque objet relié à deux
-instantanés : ce qu'il a vu en dernier dans Dolibarr, et ce qu'il a vu en dernier dans OpenProject.
+Au démarrage puis une fois par heure, le service lit **tout**, des deux côtés ; entre deux, il ne
+lit que les tâches et les temps modifiés depuis le cycle précédent (lecture incrémentale). Il
+compare chaque objet relié à deux instantanés : ce qu'il a vu en dernier dans Dolibarr, et ce qu'il
+a vu en dernier dans OpenProject. Le côté resté intact est connu par son instantané, sans le relire.
 
 - ce qui n'a changé que d'un côté est recopié de l'autre ;
 - ce qui a changé des deux côtés est tranché par la date de modification, et une alerte part ;
 - ce qui vient d'être écrit ne revient jamais en écho, même quand les formats diffèrent (HTML ↔ Markdown).
 
-OpenProject n'émet aucun webhook quand on modifie ou supprime un temps : relire l'état complet est
-le seul moyen de ne rien rater, même après une panne. Détail des choix : en-têtes de
+OpenProject n'émet aucun webhook quand on modifie ou supprime un temps, et une liste de
+« modifiés » ne dit rien des suppressions : la lecture complète régulière est le seul moyen de ne
+rien rater. Une suppression est donc recopiée à la lecture complète suivante (au plus une heure
+après ; `LECTURE_COMPLETE_MINUTES=0` pour tout relire à chaque cycle). Détail des choix : en-têtes de
 [`reconciliation.py`](src/dolop/reconciliation.py) et [`cycle.py`](src/dolop/cycle.py).
 
 ## Garde-fous
@@ -155,6 +159,8 @@ arrête le service au démarrage avec un message clair, plutôt que de le laisse
 | `DOLIBARR_ATTRIBUT_SYNCHRO` / `OPENPROJECT_CHAMP_SYNCHRO` | `synchro_openproject` / `Synchroniser avec Dolibarr` | les deux cases du périmètre choisi |
 | `OPENPROJECT_TYPES` | — | types de lots synchronisés, séparés par des virgules ; vide : tous |
 | `TEMPS_DEPUIS` | — | date `AAAA-MM-JJ` : les temps antérieurs ne sont ni lus ni synchronisés |
+| `LECTURE_COMPLETE_MINUTES` | `60` | lecture complète au plus tous les N minutes (et au démarrage) ; entre deux, seules les modifications. `0` : tout à chaque cycle |
+| `MARGE_DOLIBARR_MINUTES` | `180` | marge de « modifié depuis » côté Dolibarr, dont la base compare dans son propre fuseau (UTC ou Paris couverts) |
 | `FUSEAU` | `TZ`, sinon `Europe/Paris` | fuseau des dates de tâches et de temps |
 | `BASE_ETAT` | `/data/etat.sqlite` | mémoire du service |
 | `SAUVEGARDES` | `7` | sauvegardes quotidiennes gardées dans `/data/sauvegardes` (0 : aucune) |

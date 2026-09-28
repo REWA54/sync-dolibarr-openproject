@@ -2,7 +2,32 @@
 
 Format [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), numérotation [SemVer](https://semver.org/lang/fr/).
 
-## [Non publié]
+## [0.3.0] - 2026-09-28
+
+Des outils complexes et remplis : lire sans s'essouffler, choisir ce qui circule, relier ce qui
+existe déjà, ne relire que ce qui change.
+
+### À faire lors de la mise à jour
+- Aucune action obligatoire : la base d'état, les variables et les réglages existants restent valables.
+- **Changement de comportement** : une suppression est désormais recopiée à la lecture complète
+  suivante, au plus une heure après, et non plus au cycle suivant. `LECTURE_COMPLETE_MINUTES=0` rend
+  l'ancien comportement (tout relire à chaque cycle).
+- `DOLIBARR_ATTRIBUT` n'accepte plus que lettres, chiffres et `_` (comme Dolibarr lui-même).
+- `dolop verifier` après la mise à jour : il contrôle maintenant les filtres de la lecture incrémentale.
+
+### Outils remplis — étape 3 : ne relire que ce qui change
+- **Lecture incrémentale** : entre deux lectures complètes (au démarrage, puis au plus toutes les
+  `LECTURE_COMPLETE_MINUTES`, 60), seules les tâches et les temps modifiés sont lus (`updatedAt`
+  d'OpenProject, `tms` de Dolibarr). Le côté resté intact d'un objet relié est connu par son
+  instantané, sans le relire ; les suppressions attendent la lecture complète, seule à pouvoir les
+  constater. Un filtre refusé par un outil fait relire ce type en entier.
+- Un objet non relié qui désigne son jumeau par son identifiant embarqué fait lire ce jumeau : pas
+  de doublon après une création interrompue, même en lecture incrémentale.
+- Les alertes ponctuelles ne sont tenues pour résolues qu'après une lecture complète (sinon un
+  problème persistant serait éteint puis renvoyé chaque heure).
+- `MARGE_DOLIBARR_MINUTES` (180) : la base de Dolibarr compare les dates dans son propre fuseau.
+- `dolop rapport` donne la dernière lecture complète ; le journal dit le type de chaque cycle.
+- L'index des liens ne décode plus les instantanés.
 
 ### Outils remplis — étape 1 : lire sans s'essouffler
 - Temps de calcul linéaire : la liste des tâches « Temps hors tâche » était recalculée pour chaque

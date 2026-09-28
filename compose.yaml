@@ -19,6 +19,7 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    # Suffisant jusqu'à 40 000 objets reliés environ ; 512m au-delà (docs/outils-remplis.md).
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64

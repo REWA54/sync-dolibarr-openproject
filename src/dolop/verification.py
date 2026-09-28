@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
@@ -12,7 +14,7 @@ from .config import Config
 from .conversions import cle_nom
 from .dolibarr import Dolibarr
 from .http import Introuvable
-from .openproject import OpenProject
+from .openproject import OpenProject, _modifie_depuis
 
 # Droits Dolibarr du compte technique : (module, droit, sous-droit, libellé de l'écran Permissions).
 DROITS_DOLIBARR: tuple[tuple[str, str, str | None, str], ...] = (
@@ -114,6 +116,34 @@ def _dolibarr(config: Config) -> Iterator[Point]:
         ("/projects/alltimespent", "temps passés"),
     ):
         yield _essai(f"Dolibarr : lecture des {quoi}", "droits insuffisants", partial(_premiere_page, d, chemin))[0]
+    yield from _lecture_incrementale_dolibarr(d, config)
+
+
+def _filtre_accepte(appel: Callable[[], Any]) -> Point | None:
+    """None si le filtre passe ; sinon ce qu'il faut régler (la lecture incrémentale serait impossible)."""
+    try:
+        appel()
+    except Introuvable:
+        return None  # liste vide
+    except ErreurApi as e:
+        if e.statut == 400:
+            return Point(False, "", f"filtre refusé : régler LECTURE_COMPLETE_MINUTES=0 ({str(e)[:120]})")
+        raise
+    return None
+
+
+def _lecture_incrementale_dolibarr(d: Dolibarr, config: Config) -> Iterator[Point]:
+    if config.lecture_complete_minutes == 0:
+        return
+    depuis = datetime.now(UTC)
+    for chemin, alias, quoi in (("/tasks", "t", "tâches"), ("/projects/alltimespent", "et", "temps")):
+        libelle = f"Dolibarr : filtre « modifié depuis » des {quoi} (lecture incrémentale)"
+        filtre = d.modifie_depuis(alias, depuis)
+        try:
+            refus = _filtre_accepte(partial(d.http.get, chemin, limit=1, sqlfilters=filtre))
+        except ErreurApi as e:
+            refus = Point(False, "", str(e)[:160])
+        yield Point(True, libelle) if refus is None else Point(False, libelle, refus.conseil)
 
 
 def _premiere_page(d: Dolibarr, chemin: str) -> Any:
@@ -195,6 +225,16 @@ def _openproject(config: Config) -> Iterator[Point]:
 
     if type_id is not None:
         yield _champ_des_lots(o, config)
+    if config.lecture_complete_minutes:
+        depuis = datetime.now(UTC)
+        for chemin, quoi in (("/work_packages", "lots"), ("/time_entries", "temps")):
+            libelle = f"OpenProject : filtre « modifié depuis » des {quoi} (lecture incrémentale)"
+            filtre = json.dumps([_modifie_depuis(depuis)])
+            try:
+                refus = _filtre_accepte(partial(o.http.get, chemin, pageSize=1, filters=filtre))
+            except ErreurApi as e:
+                refus = Point(False, "", str(e)[:160])
+            yield Point(True, libelle) if refus is None else Point(False, libelle, refus.conseil)
 
 
 def _champ_des_lots(o: OpenProject, config: Config) -> Point:

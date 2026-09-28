@@ -66,6 +66,16 @@ sans dommage : chaque création est notée « en cours » avant d'être faite, e
 milieu reprend là où il en était, sans doublon. Pendant ce temps, `dolop sante` reste vert tant que
 le cycle avance.
 
+## Lecture incrémentale
+
+Au démarrage puis au plus toutes les `LECTURE_COMPLETE_MINUTES` (60), le service lit tout. Entre
+deux, il ne lit que les tâches et les temps modifiés depuis le début du cycle réussi précédent ; les
+membres attendent la lecture complète (Dolibarr ne les donne que projet par projet). Côté
+OpenProject, le filtre est exact (dates en UTC). Côté Dolibarr, la base compare dans son propre
+fuseau, que l'API ne dit pas : le filtre recule de `MARGE_DOLIBARR_MINUTES` (180, ce qui couvre une
+base en UTC ou à l'heure de Paris). Ce qu'une marge trop courte laisserait passer est rattrapé à la
+lecture complète suivante. `dolop verifier` s'assure que les deux outils acceptent ces filtres.
+
 ## Volumes et réglages
 
 | Variable | Défaut | Quand l'augmenter |
@@ -75,4 +85,4 @@ le cycle avance.
 | `TAILLE_PAGE_OPENPROJECT` | 200 | à baisser si les pages de lots expirent ; ne pas dépasser le maximum réglé dans OpenProject (*Administration → API*) |
 | `SEUIL_CREATIONS` | 50 | plus de créations légitimes par cycle (saisie de temps en masse) |
 | `SEUIL_SUPPRESSIONS_POURCENT` | 1 | seuil de suppressions : le plus grand de `SEUIL_SUPPRESSIONS` et de ce pourcentage des objets reliés |
-| mémoire du conteneur | 256 Mo | 512 Mo au-delà de quelques dizaines de milliers d'objets reliés |
+| mémoire du conteneur | 256 Mo | 512 Mo au-delà de 40 000 objets reliés environ (mesuré : un temps lu pèse 0,8 Kio, et son lien autant) |

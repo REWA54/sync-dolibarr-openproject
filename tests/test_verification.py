@@ -42,6 +42,8 @@ def serveur_pret() -> Serveur:
     s.route("GET", f"{o}/types", _liste({"id": 1, "name": "Task"}))
     s.route("GET", f"{o}/roles", _liste({"id": 3, "name": "Project admin"}, {"id": 4, "name": "Member"}))
     s.route("GET", f"{o}/work_packages/schemas/3-1", (200, {"customField4": {"name": "ID Dolibarr"}}))
+    s.route("GET", f"{o}/work_packages", _liste())
+    s.route("GET", f"{o}/time_entries", _liste())
     return s
 
 
@@ -134,3 +136,17 @@ def test_champ_des_lots_absent_de_certains_projets(brancher: Any) -> None:
     assert "« Pour tous les projets » (manquant dans : « Projet 9 »)" in texte
     assert "type « Task » non activé dans : « Projet 11 »" in texte
     assert "Projet 3" not in texte, "le projet qui a le champ n'est pas cité"
+
+
+def test_filtre_modifie_depuis_refuse_explique_quoi_regler(brancher: Any) -> None:
+    s = serveur_pret()
+    s.route(
+        "GET",
+        "/api/index.php/tasks",
+        lambda r: (400, {"error": "sqlfilters"}) if "sqlfilters" in r.url.params else (200, []),
+    )
+    brancher(s)
+    texte, tout_bon = rendre(list(verifier(CONFIG_PRETE)))
+    assert not tout_bon
+    assert "❌ Dolibarr : filtre « modifié depuis » des tâches" in texte
+    assert "LECTURE_COMPLETE_MINUTES=0" in texte

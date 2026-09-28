@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, Protocol
 
 from .modele import Cote, Enreg
@@ -22,6 +23,10 @@ class Adaptateur(Protocol):
 
     def lister(self) -> dict[str, Enreg]:
         """Tous les objets de ce type visibles de ce côté."""
+        ...
+
+    def lister_depuis(self, depuis: datetime) -> dict[str, Enreg]:
+        """Ceux modifiés depuis ``depuis`` (lecture incrémentale), quitte à en rendre de trop."""
         ...
 
     def lire(self, identifiant: str) -> Enreg | None:
@@ -69,6 +74,9 @@ class Simulateur:
 
     def lister(self) -> dict[str, Enreg]:
         return self.reel.lister()
+
+    def lister_depuis(self, depuis: datetime) -> dict[str, Enreg]:
+        return self.reel.lister_depuis(depuis)
 
     def lire(self, identifiant: str) -> Enreg | None:
         if identifiant in self.crees:

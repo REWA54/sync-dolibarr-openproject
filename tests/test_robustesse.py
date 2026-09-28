@@ -245,9 +245,11 @@ def test_service_survit_a_une_erreur_imprevue(
     caplog.set_level(logging.INFO)
     config = Config("http://d", "x", "http://o", "x", base=tmp_path / "etat.sqlite", intervalle=0)
     appels: list[str] = []
+    completes: list[bool] = []
 
-    def faux_cycle(*_: object, mode: str) -> Resultat:
+    def faux_cycle(*_: object, mode: str, forcer_lecture_complete: bool = False) -> Resultat:
         appels.append(mode)
+        completes.append(forcer_lecture_complete)
         if len(appels) == 1:
             raise RuntimeError("panne imprévue hors du cycle")
         os.kill(os.getpid(), signal.SIGTERM)  # docker stop
@@ -263,5 +265,6 @@ def test_service_survit_a_une_erreur_imprevue(
         for s, gestion in anciens.items():
             signal.signal(s, gestion)
     assert appels == ["service", "service"], "le service a continué après l'erreur"
+    assert completes == [True, True], "lecture complète au démarrage, tant qu'aucun cycle n'a réussi"
     assert "panne imprévue hors du cycle" in caplog.text
     assert "arrêté proprement" in caplog.text

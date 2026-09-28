@@ -67,6 +67,12 @@ class Config:
     seuil_creations: int = 50
     # Disjoncteur de suppressions proportionnel : seuil = max(SEUIL_SUPPRESSIONS, ce % des objets reliés).
     seuil_suppressions_pourcent: int = 1
+    # Lecture incrémentale : entre deux lectures complètes (au plus tous les N minutes), le service ne
+    # lit que les tâches et temps modifiés. 0 : lecture complète à chaque cycle.
+    lecture_complete_minutes: int = 60
+    # Dolibarr compare les dates dans le fuseau de sa base, que l'API ne dit pas : marge ajoutée à
+    # « modifié depuis » (couvre une base en UTC ou à l'heure de Paris).
+    marge_dolibarr_minutes: int = 180
 
     @property
     def fuseau(self) -> ZoneInfo:
@@ -195,6 +201,8 @@ class Config:
             temps_depuis=temps_depuis,
             seuil_creations=entier("SEUIL_CREATIONS", 50, minimum=1),
             seuil_suppressions_pourcent=entier("SEUIL_SUPPRESSIONS_POURCENT", 1, minimum=0, maximum=100),
+            lecture_complete_minutes=entier("LECTURE_COMPLETE_MINUTES", 60, minimum=0, maximum=1440),
+            marge_dolibarr_minutes=entier("MARGE_DOLIBARR_MINUTES", 180, minimum=0, maximum=1440),
         )
 
 

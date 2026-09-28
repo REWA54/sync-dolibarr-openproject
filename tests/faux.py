@@ -41,6 +41,10 @@ class FauxAdaptateur:
         self.refus: dict[str, str] = {}
         self.caches: set[str] = set()  # absents des listes mais lisibles un par un
         self.hors_perimetre: set[str] = set()  # projets non cochés « à synchroniser »
+        # Date de dernière modification que l'outil connaît toujours (colonne tms), même sans horodatage exposé.
+        self.touches: dict[str, datetime] = {}
+        self.listes_completes = 0
+        self.filtre_refuse = False
         self.interdits: set[str] = set()  # lecture directe refusée (403)
         self.stockage: Callable[[dict[str, Any]], dict[str, Any]] = lambda c: c
         self.horodate = True
@@ -53,11 +57,13 @@ class FauxAdaptateur:
         self.objets[identifiant] = dict(champs)
         self.refs[identifiant] = ref_autre
         self.maj[identifiant] = self.horloge.t if self.horodate else None
+        self.touches[identifiant] = self.horloge.t
         return identifiant
 
     def changer(self, identifiant: str, **champs: Any) -> None:
         self.objets[identifiant].update(champs)
         self.maj[identifiant] = self.horloge.t if self.horodate else None
+        self.touches[identifiant] = self.horloge.t
 
     def seul(self) -> tuple[str, dict[str, Any]]:
         assert len(self.objets) == 1, self.objets
@@ -78,7 +84,13 @@ class FauxAdaptateur:
         )
 
     def lister(self) -> dict[str, Enreg]:
+        self.listes_completes += 1
         return {i: self._enreg(i) for i in self.objets if i not in self.caches}
+
+    def lister_depuis(self, depuis: datetime) -> dict[str, Enreg]:
+        if self.filtre_refuse:
+            raise ErreurApi("filtre sqlfilters refusé", 400)
+        return {i: self._enreg(i) for i in self.objets if i not in self.caches and self.touches[i] >= depuis}
 
     def lire(self, identifiant: str) -> Enreg | None:
         if identifiant in self.interdits:
@@ -90,6 +102,7 @@ class FauxAdaptateur:
         self.objets[identifiant] = self.stockage(dict(champs))
         self.refs[identifiant] = ref_autre if self.ref_embarquee else None
         self.maj[identifiant] = self.horloge.t if self.horodate else None
+        self.touches[identifiant] = self.horloge.t
         self.ecritures.append(f"créer {identifiant}")
         if self.panne_apres_creation:
             self.panne_apres_creation = False
@@ -99,6 +112,7 @@ class FauxAdaptateur:
     def modifier(self, identifiant: str, champs: Mapping[str, Any]) -> str | None:
         self.objets[identifiant].update(self.stockage(dict(champs)))
         self.maj[identifiant] = self.horloge.t if self.horodate else None
+        self.touches[identifiant] = self.horloge.t
         self.ecritures.append(f"modifier {identifiant} {sorted(champs)}")
         return None
 
@@ -113,6 +127,7 @@ class FauxAdaptateur:
     def poser_ref_autre(self, identifiant: str, ref_autre: str | None) -> None:
         if self.ref_embarquee:
             self.refs[identifiant] = ref_autre
+            self.touches[identifiant] = self.horloge.t
 
     def verrou(self, identifiant: str) -> str | None:
         return self.verrous.get(identifiant)
@@ -175,12 +190,14 @@ class Banc:
             convertisseurs={("projet", "client"): self.client},
             commentaires_op=self.commentaires,
             notes_dol=self.notes,
+            horloge=lambda: self.horloge.t,
             **kw,
         )
 
     def cycle(self, mode: str = "une-fois", **kw: Any) -> Resultat:
         confirmer = kw.pop("confirmer_suppressions", False)
         confirmer_creations = kw.pop("confirmer_creations", False)
+        complete = kw.pop("forcer_lecture_complete", False)
         self.horloge.avancer()
         return executer_cycle(
             self.contexte(**kw),
@@ -189,6 +206,7 @@ class Banc:
             mode=mode,
             confirmer_suppressions=confirmer,
             confirmer_creations=confirmer_creations,
+            forcer_lecture_complete=complete,
         )
 
     def ecritures(self) -> list[str]:

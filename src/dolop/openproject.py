@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -33,6 +33,8 @@ from .http import ClientHttp, Introuvable
 from .modele import Enreg, Intraduisible
 
 API = "/api/v3"
+# « Modifié depuis » : OpenProject compare en UTC, la marge ne couvre que l'écart d'horloge entre serveurs.
+MARGE_HORLOGE = timedelta(minutes=5)
 
 
 def _id_lien(lien: Mapping[str, Any] | None, segment: str) -> str | None:
@@ -41,6 +43,11 @@ def _id_lien(lien: Mapping[str, Any] | None, segment: str) -> str | None:
     if not href or f"/{segment}/" not in href:
         return None
     return str(href.rstrip("/").rsplit("/", 1)[-1])
+
+
+def _modifie_depuis(depuis: datetime) -> dict[str, Any]:
+    seuil = (depuis.astimezone(UTC) - MARGE_HORLOGE).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"updatedAt": {"operator": "<>d", "values": [seuil, ""]}}
 
 
 def _lien(segment: str, identifiant: str | None) -> dict[str, str | None]:
@@ -280,6 +287,12 @@ class _Base:
             return dict(self.o.http.get(chemin))
         except Introuvable:
             return None
+
+    def lister(self) -> dict[str, Enreg]:
+        raise NotImplementedError
+
+    def lister_depuis(self, depuis: datetime) -> dict[str, Enreg]:
+        return self.lister()  # pas de filtre « modifié depuis » pour ce type : tout, c'est « de trop »
 
     def cloturer(self, identifiant: str) -> None:
         raise ErreurApi(f"clôture non prévue pour {self.type}")
@@ -525,9 +538,15 @@ class Lots(_Base):
         )
 
     def lister(self) -> dict[str, Enreg]:
+        return self._lister(self._filtres())
+
+    def lister_depuis(self, depuis: datetime) -> dict[str, Enreg]:
+        return self._lister([*self._filtres(), _modifie_depuis(depuis)])
+
+    def _lister(self, filtres: list[dict[str, Any]]) -> dict[str, Enreg]:
         if self.o.aucun_projet_actif():
             return {}
-        lots = self.o.iter_pages("/work_packages", self._filtres(), sortBy=json.dumps([["id", "asc"]]))
+        lots = self.o.iter_pages("/work_packages", filtres, sortBy=json.dumps([["id", "asc"]]))
         return {str(w["id"]): self._enreg(w) for w in lots}
 
     def _filtres(self) -> list[dict[str, Any]]:
@@ -632,11 +651,17 @@ class Temps(_Base):
         )
 
     def lister(self) -> dict[str, Enreg]:
+        return self._lister(self._filtres())
+
+    def lister_depuis(self, depuis: datetime) -> dict[str, Enreg]:
+        return self._lister([*(self._filtres() or []), _modifie_depuis(depuis)])
+
+    def _lister(self, filtres: list[dict[str, Any]] | None) -> dict[str, Enreg]:
         if self.o.aucun_projet_actif():
             return {}
         exclus = self.o.exclus()
         resultat: dict[str, Enreg] = {}
-        for t in self.o.iter_pages("/time_entries", self._filtres(), sortBy=json.dumps([["id", "asc"]])):
+        for t in self.o.iter_pages("/time_entries", filtres, sortBy=json.dumps([["id", "asc"]])):
             if t.get("ongoing"):
                 continue  # chronomètre en cours : synchronisé à l'arrêt
             e = self._enreg(t)

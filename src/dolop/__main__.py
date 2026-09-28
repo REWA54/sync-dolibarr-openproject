@@ -59,8 +59,8 @@ def construire(config: Config) -> Contexte:
     d = Dolibarr(config)
     o = OpenProject(config)
 
-    def avant_cycle() -> None:
-        d.nouveau_cycle()
+    def avant_cycle(complet: bool) -> None:
+        d.nouveau_cycle(complet)
         o.nouveau_cycle()
 
     def brancher_pouls(pouls: Callable[[], None] | None) -> None:
@@ -80,6 +80,7 @@ def construire(config: Config) -> Contexte:
         fuseau=config.fuseau,
         perimetre_choisi=config.perimetre == "choisi",
         temps_depuis=config.temps_depuis,
+        lecture_complete_minutes=config.lecture_complete_minutes,
     )
 
 
@@ -157,14 +158,18 @@ def cmd_service(config: Config, etat: Etat) -> int:
     ctx = construire(config)
     alertes = _alertes(config, etat)
     log.info("service %s démarré : un cycle toutes les %s s", _version(), config.intervalle)
+    # Au démarrage, une lecture complète : après une restauration de la base ou un déménagement, les
+    # instantanés ne décrivent peut-être plus les outils. Les suivantes, au rythme de LECTURE_COMPLETE_MINUTES.
+    lecture_complete = True
     while not arret.is_set():
         # Rien ne doit arrêter la boucle : une erreur imprévue est journalisée et le cycle suivant
         # repart de zéro. Si elle se répète, « dolop sante » passe au rouge au bout de 15 minutes.
         try:
             with verrou(config.verrou, attente=config.intervalle):
-                r = executer_cycle(ctx, etat, alertes, mode="service")
-            resume = {k: v for k, v in r.bilan.resume().items() if v}
-            log.info("cycle %s : %s %s %s", r.cycle, r.statut, json.dumps(resume, ensure_ascii=False), r.message)
+                r = executer_cycle(ctx, etat, alertes, mode="service", forcer_lecture_complete=lecture_complete)
+            lecture_complete = lecture_complete and r.statut != "réussi"
+            resume = json.dumps({k: v for k, v in r.bilan.resume().items() if v}, ensure_ascii=False)
+            log.info("cycle %s (%s) : %s %s %s", r.cycle, r.lecture, r.statut, resume, r.message)
             entretenir(config, etat, alertes)
         except DejaEnCours as e:
             log.warning("cycle sauté : %s", e)
@@ -219,6 +224,7 @@ def cmd_rapport(etat: Etat) -> int:
     if en_cours:
         print(f"\nCréations interrompues à reprendre : {len(en_cours)}")
     print(f"\nDernier succès : {etat.meta('dernier_succes') or 'jamais'}")
+    print(f"Dernière lecture complète : {etat.meta('derniere_lecture_complete') or 'jamais'}")
     print("\nDerniers cycles :")
     for c in etat.derniers_cycles(10):
         resume = {k: v for k, v in json.loads(c["resume"] or "{}").items() if v}

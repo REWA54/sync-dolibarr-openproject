@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import replace
-from datetime import time
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
 import httpx
@@ -129,6 +129,16 @@ class Dolibarr:
 
     def en_parallele(self, lecture: Callable[[str], Any], identifiants: Iterable[str]) -> list[Any]:
         return en_parallele(lecture, identifiants, self.config.lectures_paralleles)
+
+    def modifie_depuis(self, alias: str, depuis: datetime) -> str:
+        """Critère « modifié depuis » (colonne ``tms``, tenue par la base à chaque modification).
+
+        La base compare dans son propre fuseau, que l'API ne donne pas : la date est écrite en UTC et
+        reculée de MARGE_DOLIBARR_MINUTES. Relire quelques objets de trop ne coûte qu'une comparaison ;
+        ce qu'une marge trop courte laisserait passer est rattrapé à la lecture complète suivante.
+        """
+        seuil = depuis.astimezone(UTC) - timedelta(minutes=self.config.marge_dolibarr_minutes)
+        return f"({alias}.tms:>=:'{seuil.strftime('%Y-%m-%d %H:%M:%S')}')"
 
     def utilisateurs(self) -> list[dict[str, Any]]:
         if self._utilisateurs is None:
@@ -245,6 +255,12 @@ class _Base:
 
     def __init__(self, d: Dolibarr):
         self.d = d
+
+    def lister(self) -> dict[str, Enreg]:
+        raise NotImplementedError
+
+    def lister_depuis(self, depuis: datetime) -> dict[str, Enreg]:
+        return self.lister()  # pas de filtre « modifié depuis » pour ce type : tout, c'est « de trop »
 
     def cloturer(self, identifiant: str) -> None:
         raise ErreurApi(f"clôture non prévue pour {self.type}")
@@ -534,6 +550,12 @@ class Taches(_Base):
     def lister(self) -> dict[str, Enreg]:
         return self._lister(self.d.iter_pages("/tasks", sortfield="t.rowid"))
 
+    def lister_depuis(self, depuis: datetime) -> dict[str, Enreg]:
+        """Tâches modifiées depuis ``depuis``. Un changement d'intervenant ne date pas la tâche dans
+        Dolibarr : il n'est vu qu'à la lecture complète suivante."""
+        filtre = self.d.modifie_depuis("t", depuis)
+        return self._lister(self.d.iter_pages("/tasks", sortfield="t.rowid", sqlfilters=filtre))
+
     def _lister(self, taches: Iterable[Mapping[str, Any]]) -> dict[str, Enreg]:
         hors, clos = self.d.taches_hors_tache(), self.d.projets_clos()
         # Converties au fil de la lecture ; l'assigné, qui demande une requête par tâche, est lu
@@ -672,12 +694,18 @@ class Temps(_Base):
         return self.d.pages("/projects/alltimespent", sortfield="et.rowid", **params)
 
     def lister(self) -> dict[str, Enreg]:
-        return self._lister(self.d.iter_pages("/projects/alltimespent", sortfield="et.rowid", **self._depuis()))
+        return self._lister(self.d.iter_pages("/projects/alltimespent", sortfield="et.rowid", **self._filtres()))
 
-    def _depuis(self) -> dict[str, str]:
+    def lister_depuis(self, depuis: datetime) -> dict[str, Enreg]:
+        filtres = self._filtres(self.d.modifie_depuis("et", depuis))
+        return self._lister(self.d.iter_pages("/projects/alltimespent", sortfield="et.rowid", **filtres))
+
+    def _filtres(self, *criteres: str) -> dict[str, str]:
         """TEMPS_DEPUIS : l'historique antérieur n'est ni lu ni synchronisé."""
-        depuis = self.d.config.temps_depuis
-        return {} if depuis is None else {"sqlfilters": f"(et.element_date:>=:'{depuis.isoformat()}')"}
+        tous = list(criteres)
+        if self.d.config.temps_depuis is not None:
+            tous.append(f"(et.element_date:>=:'{self.d.config.temps_depuis.isoformat()}')")
+        return {"sqlfilters": " and ".join(tous)} if tous else {}
 
     def _lister(self, lignes: Iterable[Mapping[str, Any]]) -> dict[str, Enreg]:
         exclus = self.d.exclus()

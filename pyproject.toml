@@ -1,6 +1,6 @@
 [project]
 name = "dolop"
-version = "0.2.0"
+version = "0.3.0"
 description = "Synchronisation Dolibarr ↔ OpenProject : projets, utilisateurs, membres, tâches, temps et commentaires"
 readme = "README.md"
 license = "MIT"

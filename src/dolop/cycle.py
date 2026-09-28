@@ -1,7 +1,10 @@
 """Un cycle de synchronisation, de la lecture des deux outils à l'écriture des écarts.
 
 Déroulé :
-  A. lire tout, des deux côtés ; confirmer une à une (accès direct → 404) les absences ;
+  A. lire tout, des deux côtés ; confirmer une à une (accès direct → 404) les absences. Entre deux
+     lectures complètes, le service ne lit que les tâches et les temps modifiés (lecture
+     incrémentale) : le côté resté intact d'un objet relié est connu par son instantané, et les
+     suppressions attendent la lecture complète suivante, seule à pouvoir les constater ;
   B. disjoncteur : trop de suppressions prévues → on s'arrête avant toute écriture ;
   C. créations et modifications, type par type, de haut en bas (utilisateurs → temps) ;
   D. suppressions, de bas en haut (temps → projets) ;
@@ -20,17 +23,17 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from .adaptateurs import Adaptateur, ErreurApi, Simulateur
 from .alertes import Alertes
 from .conversions import maintenant, markdown_vers_html
-from .entites import ORDRE, PROJET, TACHE, TEMPS, UTILISATEUR
+from .entites import MEMBRE, ORDRE, PROJET, TACHE, TEMPS, UTILISATEUR
 from .etat import Etat
 from .execution import Bilan, Echo, Executeur
-from .modele import COTES, NOM_COTE, Cloturer, Cote, Creer, Enreg, Lien, Regles, Supprimer
+from .modele import COTES, NOM_COTE, Cloturer, Cote, Creer, Enreg, Lien, Regles, Supprimer, autre
 from .reconciliation import Entree, reconcilier
 from .traduction import Convertisseur, IndexLiens, Traducteur
 
@@ -60,7 +63,8 @@ class Contexte:
     convertisseurs: Mapping[tuple[str, str], Convertisseur] = field(default_factory=dict)
     commentaires_op: SourceCommentaires | None = None
     notes_dol: CibleNotes | None = None
-    avant_cycle: Callable[[], None] = lambda: None
+    # Reçoit True avant une lecture complète, False avant une lecture incrémentale.
+    avant_cycle: Callable[[bool], None] = lambda _complet: None
     # Reçoit la fonction « signe de vie » à appeler à chaque réponse HTTP (None en fin de cycle).
     brancher_pouls: Callable[[Callable[[], None] | None], None] = lambda _pouls: None
     seuil_suppressions: int = 5
@@ -73,6 +77,10 @@ class Contexte:
     perimetre_choisi: bool = False
     # Temps antérieurs : hors périmètre (ni lus, ni cherchés un par un, ni supprimés).
     temps_depuis: date | None = None
+    # Lecture complète au plus tous les N minutes en service ; entre deux, lecture incrémentale. 0 : toujours complète.
+    lecture_complete_minutes: int = 0
+    # Horloge des dates « modifié depuis » (remplaçable dans les tests).
+    horloge: Callable[[], datetime] = maintenant
 
 
 @dataclass(frozen=True)
@@ -95,6 +103,7 @@ class Resultat:
     bilan: Bilan
     message: str = ""
     plan: list[Ecriture] = field(default_factory=list)
+    lecture: str = "complète"  # ou « incrémentale »
 
     @property
     def ecritures(self) -> list[str]:
@@ -146,6 +155,7 @@ def executer_cycle(
     mode: str,
     confirmer_suppressions: bool = False,
     confirmer_creations: bool = False,
+    forcer_lecture_complete: bool = False,
     echo: Echo | None = None,
 ) -> Resultat:
     ecrire = mode != "simuler"
@@ -165,6 +175,8 @@ def executer_cycle(
                 simulateurs.append(sim)
                 adaptateurs[cote][type_] = sim
 
+    debut = ctx.horloge()
+    depuis = None if forcer_lecture_complete else _depuis(ctx, etat, mode, debut)
     cycle = etat.debuter_cycle(mode)
     bilan = Bilan()
     statut, message = "réussi", ""
@@ -173,8 +185,9 @@ def executer_cycle(
     deroule = _Cycle(ctx, adaptateurs, notes, etat, alertes, cycle, bilan, echo, confirmer_suppressions, pouls)
     deroule.confirmer_creations = confirmer_creations
     deroule.simulation = not ecrire
+    deroule.depuis = depuis
     try:
-        ctx.avant_cycle()
+        ctx.avant_cycle(depuis is None)
         deroule.derouler()
         if deroule.blocage:  # simulation : le plan complet est montré, le cycle reste « bloqué »
             raise Disjoncteur(deroule.blocage)
@@ -194,9 +207,16 @@ def executer_cycle(
 
     if statut == "réussi":
         alertes.retablir("disjoncteur", "Le disjoncteur est refermé : la synchronisation a repris.")
-        alertes.fin_de_cycle()
+        if depuis is None:
+            alertes.fin_de_cycle()
+        else:
+            # Un cycle incrémental ne revoit pas tout : il ne peut pas dire qu'un problème a disparu.
+            alertes.levees.clear()
         if ecrire:
             etat.poser_meta("dernier_succes", maintenant().isoformat(timespec="seconds"))
+            etat.poser_meta("dernier_debut_reussi", debut.isoformat(timespec="seconds"))
+            if depuis is None:
+                etat.poser_meta("derniere_lecture_complete", debut.isoformat(timespec="seconds"))
     if mode == "service":
         if statut == "échec":
             n = etat.echecs_consecutifs()
@@ -209,14 +229,31 @@ def executer_cycle(
     plan += notes_simulees.ecritures
     if not ecrire:
         etat.fermer()  # la copie de simulation
-    return Resultat(cycle, statut, bilan, message, plan)
+    return Resultat(cycle, statut, bilan, message, plan, "complète" if depuis is None else "incrémentale")
+
+
+def _depuis(ctx: Contexte, etat: Etat, mode: str, debut: datetime) -> datetime | None:
+    """Début du dernier cycle réussi, si ce cycle peut se contenter de lire ce qui a changé depuis.
+
+    Lecture complète : hors service (simulation et cycle manuel voient tout), au premier cycle, et au
+    plus tous les LECTURE_COMPLETE_MINUTES. Partir du *début* du dernier cycle réussi, et non de sa
+    fin, couvre ce qui a été modifié pendant qu'il tournait.
+    """
+    if mode != "service" or ctx.lecture_complete_minutes <= 0:
+        return None
+    complete, dernier = etat.meta("derniere_lecture_complete"), etat.meta("dernier_debut_reussi")
+    if complete is None or dernier is None:
+        return None
+    if debut - datetime.fromisoformat(complete) >= timedelta(minutes=ctx.lecture_complete_minutes):
+        return None
+    return datetime.fromisoformat(dernier)
 
 
 def lire_les_deux(ctx: Contexte, etat: Etat) -> tuple[dict[str, dict[Cote, dict[str, Enreg]]], dict[Cote, set[str]]]:
     """Tout lire des deux côtés, comme un cycle complet, sans rien écrire (pour « dolop apparier »)."""
     lecture = _Cycle(ctx, ctx.adaptateurs, None, etat, Alertes(etat, envoi=None), 0, Bilan(), None, False)
     lecture.simulation = True
-    ctx.avant_cycle()
+    ctx.avant_cycle(True)
     lecture.lire()
     return lecture.lus, lecture.geles
 
@@ -249,6 +286,10 @@ class _Cycle:
         # En simulation, le disjoncteur n'arrête pas le déroulé : on veut voir tout ce qui serait fait.
         self.simulation = False
         self.blocage = ""
+        # Lecture incrémentale : début du dernier cycle réussi (None : lecture complète).
+        self.depuis: datetime | None = None
+        # Objets d'un lien complétés par leur instantané, faute d'avoir été modifiés (lecture incrémentale).
+        self.completes: dict[str, dict[Cote, set[str]]] = {r.type: {"dol": set(), "op": set()} for r in ORDRE}
         self.lus: dict[str, dict[Cote, dict[str, Enreg]]] = {}
         self.absents: dict[str, dict[Cote, set[str]]] = {}
         self.geles: dict[Cote, set[str]] = {"dol": set(), "op": set()}
@@ -261,8 +302,18 @@ class _Cycle:
     def lire(self) -> None:
         for r in ORDRE:
             liens = self.etat.liens(r.type)
-            lus = {c: self.a[c][r.type].lister() for c in COTES}
             actifs = [lien for lien in liens if not lien.rompu]
+            if self.depuis is not None and r is MEMBRE:
+                # Dolibarr ne donne les membres que projet par projet : lus à la lecture complète seulement.
+                self.lus[r.type], self.absents[r.type] = {"dol": {}, "op": {}}, {"dol": set(), "op": set()}
+                continue
+            if self.depuis is not None and r in (TACHE, TEMPS):
+                modifies = self.lire_modifies(r, actifs, self.depuis)
+                if modifies is not None:
+                    self.lus[r.type], self.absents[r.type] = modifies, {"dol": set(), "op": set()}
+                    self.pouls()
+                    continue
+            lus = {c: self.a[c][r.type].lister() for c in COTES}
             for c in COTES:
                 # Des projets ou des utilisateurs qui disparaissent tous d'un coup : c'est presque
                 # toujours un compte technique qui a perdu ses droits. OpenProject répond alors 404
@@ -278,6 +329,39 @@ class _Cycle:
             self.absents[r.type] = self.confirmer_absences(r, lus, actifs)
             if r is PROJET:
                 self.geles = self.calculer_geles(liens, lus)
+
+    def lire_modifies(self, r: Regles, liens: list[Lien], depuis: datetime) -> dict[Cote, dict[str, Enreg]] | None:
+        """Lecture incrémentale d'un type ; None si un outil refuse le filtre (on lit alors tout)."""
+        try:
+            lus = {c: self.a[c][r.type].lister_depuis(depuis) for c in COTES}
+        except ErreurApi as e:
+            if e.statut != 400:
+                raise
+            log.warning("%s : filtre « modifié depuis » refusé, lecture complète de ce type (%s)", r.libelle, e)
+            return None
+        for lien in liens:
+            for c in COTES:
+                ici, la_bas = lien.id_de(c), lien.id_de(autre(c))
+                if ici not in lus[c] or la_bas in lus[autre(c)]:
+                    continue
+                # Modifié d'un seul côté : l'autre n'a pas bougé depuis ce qu'on y a vu ou écrit en dernier.
+                snap = lien.snap_de(autre(c))
+                if snap is not None:
+                    lus[autre(c)][la_bas] = Enreg(la_bas, dict(snap), ref_autre=ici, libelle=f"{r.libelle} {la_bas}")
+                    self.completes[r.type][autre(c)].add(la_bas)
+                elif (objet := self.a[autre(c)][r.type].lire(la_bas)) is not None:
+                    lus[autre(c)][la_bas] = objet  # lien sans instantané (tout juste apparié) : on le lit
+        # Un objet non relié qui désigne son jumeau (identifiant embarqué) : sans lire ce jumeau, resté
+        # intact donc absent de la liste, l'objet serait recopié en double.
+        connus = {c: {lien.id_de(c) for lien in liens} for c in COTES}
+        for c in COTES:
+            for objet in list(lus[c].values()):
+                ref = objet.ref_autre
+                if ref and objet.id not in connus[c] and ref not in lus[autre(c)] and ref not in connus[autre(c)]:
+                    jumeau = self.a[autre(c)][r.type].lire(ref)
+                    if jumeau is not None:
+                        lus[autre(c)][jumeau.id] = jumeau
+        return lus
 
     def confirmer_absences(
         self, r: Regles, lus: dict[Cote, dict[str, Enreg]], liens: list[Lien]
@@ -409,7 +493,7 @@ class _Cycle:
     def derouler(self) -> None:
         self.lire()
         index = IndexLiens()
-        index.charger(self.etat.liens())
+        index.charger(self.etat.paires())
         traducteur = Traducteur(index, self.ctx.convertisseurs)
         self.verifier_disjoncteur(traducteur)
 
@@ -448,8 +532,8 @@ class _Cycle:
             dol, op = lus["dol"].get(lien.dol_id), lus["op"].get(lien.op_id)
             if lien.rompu or dol is None or op is None:
                 continue
-            if str(dol.champs.get("projet")) in self.geles["dol"]:
-                continue
+            if str(dol.champs.get("projet")) in self.geles["dol"] or lien.op_id in self.completes[TACHE.type]["op"]:
+                continue  # projet gelé, ou lot resté intact (un commentaire date le lot)
             maj = op.modifie_le.isoformat() if op.modifie_le else None
             vu, empreinte = self.etat.commentaires(lien.op_id)
             if maj is not None and maj == vu:
