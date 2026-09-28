@@ -29,6 +29,7 @@
 - [Comment ça marche](#comment-ça-marche)
 - [Garde-fous](#garde-fous)
 - [Installation en 5 étapes](#installation-en-5-étapes)
+- [Outils déjà remplis](#outils-déjà-remplis)
 - [Configuration](#configuration)
 - [Commandes](#commandes)
 - [Exploitation](#exploitation)
@@ -74,7 +75,7 @@ le seul moyen de ne rien rater, même après une panne. Détail des choix : en-t
 ## Garde-fous
 
 - **Suppression confirmée** : un objet absent n'est tenu pour supprimé qu'après un accès direct qui répond 404. Un refus d'accès n'est jamais pris pour une suppression.
-- **Disjoncteur** : plus de 5 suppressions prévues, ou des projets qui disparaissent tous d'un coup, et le cycle s'arrête **avant toute écriture**, avec une alerte.
+- **Disjoncteur** : trop de suppressions prévues (plus de 5, ou de 1 % des objets reliés si c'est davantage), des projets qui disparaissent tous d'un coup, ou plus de 50 créations d'un coup (un outil rempli branché sans réglage), et le cycle s'arrête **avant toute écriture**, avec une alerte.
 - **Pas de doublon** : chaque création est notée « en cours » avant d'être faite, l'identifiant du jumeau est embarqué dans l'objet, et un verrou empêche deux cycles simultanés.
 - **Simulation** : `dolop simuler` montre chaque écriture prévue sans rien toucher ; `dolop annuler <cycle>` défait les créations d'un cycle.
 - **Projets gelés** : les tâches et les temps d'un projet clos ou archivé ne bougent plus.
@@ -120,6 +121,12 @@ docker exec sync-dolibarr-openproject dolop rapport      # liens, derniers cycle
 
 Au bout de quelques minutes, `docker ps` doit afficher le conteneur `healthy`.
 
+## Outils déjà remplis
+
+Sur un Dolibarr et un OpenProject qui servent déjà, choisir ce qui circule (projets cochés, types de
+lots, date de départ des temps), relier ce qui existe des deux côtés avec `dolop apparier`, puis
+vérifier le premier chargement avant de le lancer : [`docs/outils-remplis.md`](docs/outils-remplis.md).
+
 ## Configuration
 
 Par variables d'environnement. Chaque secret peut aussi être lu dans un fichier (secrets Docker) :
@@ -141,7 +148,13 @@ arrête le service au démarrage avec un message clair, plutôt que de le laisse
 | `OPENPROJECT_CHAMP_CLIENT` | `Client` | nom du champ personnalisé texte des projets |
 | `TACHE_HORS_TACHE` | `Temps hors tâche` | tâche Dolibarr qui reçoit les temps OpenProject saisis sans lot |
 | `INTERVALLE_SECONDES` | `120` | pause entre deux cycles (10 au minimum) |
-| `SEUIL_SUPPRESSIONS` / `SEUIL_POURCENT` | `5` / `20` | disjoncteur |
+| `SEUIL_SUPPRESSIONS` / `SEUIL_POURCENT` | `5` / `20` | disjoncteur : suppressions par cycle, % d'un type |
+| `SEUIL_SUPPRESSIONS_POURCENT` | `1` | seuil de suppressions relevé à ce % des objets reliés, s'il dépasse `SEUIL_SUPPRESSIONS` |
+| `SEUIL_CREATIONS` | `50` | disjoncteur : créations par cycle au-delà desquelles il faut `--confirmer-creations` |
+| `PERIMETRE` | `tout` | `choisi` : seuls les projets cochés « à synchroniser » circulent ([outils remplis](docs/outils-remplis.md)) |
+| `DOLIBARR_ATTRIBUT_SYNCHRO` / `OPENPROJECT_CHAMP_SYNCHRO` | `synchro_openproject` / `Synchroniser avec Dolibarr` | les deux cases du périmètre choisi |
+| `OPENPROJECT_TYPES` | — | types de lots synchronisés, séparés par des virgules ; vide : tous |
+| `TEMPS_DEPUIS` | — | date `AAAA-MM-JJ` : les temps antérieurs ne sont ni lus ni synchronisés |
 | `FUSEAU` | `TZ`, sinon `Europe/Paris` | fuseau des dates de tâches et de temps |
 | `BASE_ETAT` | `/data/etat.sqlite` | mémoire du service |
 | `SAUVEGARDES` | `7` | sauvegardes quotidiennes gardées dans `/data/sauvegardes` (0 : aucune) |
@@ -162,6 +175,9 @@ Avec Docker Compose, ces variables sont alimentées par celles préfixées `DOLO
 | `dolop simuler [--export fichier.csv]` | ce qui serait fait, sans rien écrire (commande par défaut) : résumé, 40 premières lignes, liste complète en CSV |
 | `dolop une-fois` | un cycle réel |
 | `dolop une-fois --confirmer-suppressions` | après un disjoncteur, une fois la simulation vérifiée |
+| `dolop une-fois --confirmer-creations` | premier chargement d'un outil rempli, une fois la simulation vérifiée |
+| `dolop apparier [--fichier f.csv]` | propose les objets déjà présents des deux côtés à relier (lecture seule) |
+| `dolop apparier --appliquer f.csv [--oui]` | relie les paires relues ; sans `--oui`, montre seulement |
 | `dolop service` | boucle (commande du conteneur) |
 | `dolop rapport` | liens, derniers cycles, alertes en cours |
 | `dolop annuler <n° de cycle> [--oui]` | montre ce qu'un cycle a créé ; `--oui` le supprime |

@@ -99,6 +99,13 @@ def _dolibarr(config: Config) -> Iterator[Point]:
             f"Dolibarr : attribut « {config.dolibarr_attribut} » sur les {quoi}",
             f"le créer dans /projet/admin/{ecran} (code exact : {config.dolibarr_attribut})",
         )
+    if config.perimetre == "choisi":
+        code = config.dolibarr_attribut_synchro
+        yield Point(
+            code in ((attributs or {}).get("projet") or {}),
+            f"Dolibarr : case « {code} » sur les projets (PERIMETRE=choisi)",
+            f"la créer dans /projet/admin/project_extrafields.php, type Case à cocher (code exact : {code})",
+        )
     # Une seule page suffit à prouver le droit de lecture ; tout lire serait long sur un Dolibarr rempli.
     for chemin, quoi in (
         ("/projects", "projets"),
@@ -147,11 +154,14 @@ def _openproject(config: Config) -> Iterator[Point]:
         ):
             yield Point(True, libelle, pourquoi, attente=True)
 
-    for genre, nom, ecran in (
-        ("projet", config.op_champ_client, "/admin/settings/project_custom_fields"),
-        ("projet", config.op_champ_ref, "/admin/settings/project_custom_fields"),
-        ("temps", config.op_champ_ref, "/custom_fields?tab=TimeEntryCustomField"),
-    ):
+    champs = [
+        ("projet", config.op_champ_client, "/admin/settings/project_custom_fields", "Texte"),
+        ("projet", config.op_champ_ref, "/admin/settings/project_custom_fields", "Texte"),
+        ("temps", config.op_champ_ref, "/custom_fields?tab=TimeEntryCustomField", "Texte"),
+    ]
+    if config.perimetre == "choisi":
+        champs.append(("projet", config.op_champ_synchro, "/admin/settings/project_custom_fields", "Booléen"))
+    for genre, nom, ecran, type_champ in champs:
         if attente and genre == "temps":
             continue
         libelle = f"OpenProject : champ « {nom} » des {'projets' if genre == 'projet' else 'temps'}"
@@ -160,7 +170,7 @@ def _openproject(config: Config) -> Iterator[Point]:
         except ErreurApi as e:
             yield Point(False, libelle, f"lecture du schéma impossible ({str(e)[:160]})")
             continue
-        yield Point(trouve is not None, libelle, f"le créer (type Texte) dans {ecran}")
+        yield Point(trouve is not None, libelle, f"le créer (type {type_champ}) dans {ecran}")
 
     if attente:
         return
@@ -170,6 +180,12 @@ def _openproject(config: Config) -> Iterator[Point]:
         o.type_par_defaut,
     )
     yield point
+    if config.op_types:
+        yield _essai(
+            f"OpenProject : types de lots synchronisés ({', '.join(config.op_types)})",
+            "régler OPENPROJECT_TYPES sur des noms de types existants",
+            o.types_synchronises,
+        )[0]
     for canonique, nom in (("chef", config.op_role_chef), ("contributeur", config.op_role_contributeur)):
         yield _essai(
             f"OpenProject : rôle « {nom} »",

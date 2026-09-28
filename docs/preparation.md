@@ -91,6 +91,9 @@ docker compose run --rm sync-dolibarr-openproject dolop une-fois   # premier cyc
 docker compose up -d                                               # puis le service, un cycle toutes les 2 minutes
 ```
 
+Outils déjà remplis (projets, tâches ou temps existant déjà des deux côtés) : suivre
+[`outils-remplis.md`](outils-remplis.md) avant le premier cycle.
+
 Bon à savoir :
 - les projets **clos** jamais synchronisés restent dans Dolibarr. Un projet archivé n'accepte plus
   de tâches dans OpenProject ; s'il est rouvert, il arrive avec ses tâches ;

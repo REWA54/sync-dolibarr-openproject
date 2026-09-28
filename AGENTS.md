@@ -34,6 +34,8 @@ premier `dolop une-fois` ou `docker compose up -d`, et montrer le résultat à l
 | `src/dolop/dolibarr.py`, `openproject.py` | adaptateurs HTTP de chaque outil |
 | `src/dolop/etat.py` | base SQLite : liens, instantanés, journal, alertes, sauvegardes |
 | `src/dolop/config.py` | variables d'environnement, validées au démarrage |
+| `src/dolop/appariement.py` | `dolop apparier` : relier ce qui existe déjà des deux côtés |
+| `src/dolop/parallele.py` | lectures simultanées (jamais d'écriture en parallèle) |
 | `tests/faux.py` | deux faux outils en mémoire pour les scénarios de `test_cycle.py` |
 
 ## Règles à ne jamais enfreindre

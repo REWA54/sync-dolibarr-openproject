@@ -10,6 +10,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -54,6 +55,18 @@ class Config:
     lectures_paralleles: int = 4
     # « dolop sante » : délai sans cycle réussi (ni cycle en cours qui avance) avant de passer au rouge.
     sante_minutes: int = 15
+    # Périmètre : « tout » (tous les projets actifs) ou « choisi » (projets cochés d'un côté ou de l'autre).
+    perimetre: str = "tout"
+    dolibarr_attribut_synchro: str = "synchro_openproject"
+    op_champ_synchro: str = "Synchroniser avec Dolibarr"
+    # Types de lots synchronisés (noms) ; vide : tous.
+    op_types: tuple[str, ...] = ()
+    # Temps passés avant cette date : ni lus ni synchronisés (historique souvent déjà facturé).
+    temps_depuis: date | None = None
+    # Disjoncteur de créations : au-delà, rien n'est écrit sans « --confirmer-creations ».
+    seuil_creations: int = 50
+    # Disjoncteur de suppressions proportionnel : seuil = max(SEUIL_SUPPRESSIONS, ce % des objets reliés).
+    seuil_suppressions_pourcent: int = 1
 
     @property
     def fuseau(self) -> ZoneInfo:
@@ -129,10 +142,22 @@ class Config:
         if webhook and urlsplit(webhook).scheme not in ("http", "https"):
             raise ErreurConfig("ALERTE_WEBHOOK_URL doit être une adresse http(s)://…")
 
-        # Le code de l'attribut entre dans un filtre de l'API Dolibarr : les caractères de Dolibarr, sans plus.
-        attribut = texte("DOLIBARR_ATTRIBUT", "openproject_id")
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", attribut):
-            raise ErreurConfig(f"DOLIBARR_ATTRIBUT : code d'attribut invalide {attribut!r} (lettres, chiffres, _)")
+        # Le code des attributs entre dans un filtre de l'API Dolibarr : les caractères de Dolibarr, sans plus.
+        def attribut(nom: str, defaut: str) -> str:
+            code = texte(nom, defaut)
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", code):
+                raise ErreurConfig(f"{nom} : code d'attribut invalide {code!r} (lettres, chiffres, _)")
+            return code
+
+        perimetre = texte("PERIMETRE", "tout").casefold()
+        if perimetre not in ("tout", "choisi"):
+            raise ErreurConfig(f"PERIMETRE doit valoir « tout » ou « choisi » (reçu {perimetre!r})")
+        temps_depuis = None
+        if env.get("TEMPS_DEPUIS"):
+            try:
+                temps_depuis = date.fromisoformat(env["TEMPS_DEPUIS"])
+            except ValueError as e:
+                raise ErreurConfig(f"TEMPS_DEPUIS doit être une date AAAA-MM-JJ (reçu {env['TEMPS_DEPUIS']!r})") from e
 
         exclus = env.get("EXCLURE_LOGINS", "admin")
         return cls(
@@ -141,7 +166,7 @@ class Config:
             openproject_url=url("OPENPROJECT_URL"),
             openproject_cle=str(secrets["OPENPROJECT_API_KEY"]),
             openproject_hote=optionnel("OPENPROJECT_HOST"),
-            dolibarr_attribut=attribut,
+            dolibarr_attribut=attribut("DOLIBARR_ATTRIBUT", "openproject_id"),
             op_champ_ref=texte("OPENPROJECT_CHAMP_REF", "ID Dolibarr"),
             op_champ_client=texte("OPENPROJECT_CHAMP_CLIENT", "Client"),
             op_role_chef=texte("OPENPROJECT_ROLE_CHEF", "Project admin"),
@@ -163,6 +188,13 @@ class Config:
             delai_http=entier("DELAI_HTTP_SECONDES", 60, minimum=5, maximum=600),
             lectures_paralleles=entier("LECTURES_PARALLELES", 4, minimum=1, maximum=16),
             sante_minutes=entier("SANTE_MINUTES", 15, minimum=5, maximum=1440),
+            perimetre=perimetre,
+            dolibarr_attribut_synchro=attribut("DOLIBARR_ATTRIBUT_SYNCHRO", "synchro_openproject"),
+            op_champ_synchro=texte("OPENPROJECT_CHAMP_SYNCHRO", "Synchroniser avec Dolibarr"),
+            op_types=tuple(x.strip() for x in env.get("OPENPROJECT_TYPES", "").split(",") if x.strip()),
+            temps_depuis=temps_depuis,
+            seuil_creations=entier("SEUIL_CREATIONS", 50, minimum=1),
+            seuil_suppressions_pourcent=entier("SEUIL_SUPPRESSIONS_POURCENT", 1, minimum=0, maximum=100),
         )
 
 

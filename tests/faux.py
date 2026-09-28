@@ -40,6 +40,7 @@ class FauxAdaptateur:
         self.verrous: dict[str, str] = {}
         self.refus: dict[str, str] = {}
         self.caches: set[str] = set()  # absents des listes mais lisibles un par un
+        self.hors_perimetre: set[str] = set()  # projets non cochés « à synchroniser »
         self.interdits: set[str] = set()  # lecture directe refusée (403)
         self.stockage: Callable[[dict[str, Any]], dict[str, Any]] = lambda c: c
         self.horodate = True
@@ -67,7 +68,14 @@ class FauxAdaptateur:
     def _enreg(self, identifiant: str) -> Enreg:
         champs = self.objets[identifiant]
         libelle = str(champs.get("titre") or champs.get("email") or identifiant)
-        return Enreg(identifiant, dict(champs), self.maj.get(identifiant), self.refs.get(identifiant), libelle)
+        return Enreg(
+            identifiant,
+            dict(champs),
+            self.maj.get(identifiant),
+            self.refs.get(identifiant),
+            libelle,
+            perimetre=identifiant not in self.hors_perimetre,
+        )
 
     def lister(self) -> dict[str, Enreg]:
         return {i: self._enreg(i) for i in self.objets if i not in self.caches}
@@ -172,8 +180,16 @@ class Banc:
 
     def cycle(self, mode: str = "une-fois", **kw: Any) -> Resultat:
         confirmer = kw.pop("confirmer_suppressions", False)
+        confirmer_creations = kw.pop("confirmer_creations", False)
         self.horloge.avancer()
-        return executer_cycle(self.contexte(**kw), self.etat, self.alertes, mode=mode, confirmer_suppressions=confirmer)
+        return executer_cycle(
+            self.contexte(**kw),
+            self.etat,
+            self.alertes,
+            mode=mode,
+            confirmer_suppressions=confirmer,
+            confirmer_creations=confirmer_creations,
+        )
 
     def ecritures(self) -> list[str]:
         tout = [f"dol {self.dol[t].type} {e}" for t in self.dol for e in self.dol[t].ecritures]

@@ -14,22 +14,23 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from .adaptateurs import Adaptateur, ErreurApi, Simulateur
 from .alertes import Alertes
 from .conversions import maintenant, markdown_vers_html
-from .entites import ORDRE, PROJET, TACHE
+from .entites import ORDRE, PROJET, TACHE, TEMPS, UTILISATEUR
 from .etat import Etat
 from .execution import Bilan, Echo, Executeur
-from .modele import COTES, NOM_COTE, Cloturer, Cote, Enreg, Lien, Regles, Supprimer
+from .modele import COTES, NOM_COTE, Cloturer, Cote, Creer, Enreg, Lien, Regles, Supprimer
 from .reconciliation import Entree, reconcilier
 from .traduction import Convertisseur, IndexLiens, Traducteur
 
@@ -64,7 +65,14 @@ class Contexte:
     brancher_pouls: Callable[[Callable[[], None] | None], None] = lambda _pouls: None
     seuil_suppressions: int = 5
     seuil_pourcent: int = 20
+    # Seuil total de suppressions : le plus grand de seuil_suppressions et de ce % des objets reliés.
+    seuil_suppressions_pourcent: int = 1
+    seuil_creations: int = 50
     fuseau: ZoneInfo = field(default_factory=lambda: ZoneInfo("Europe/Paris"))
+    # Périmètre choisi : un utilisateur n'est recopié que s'il est concerné par un projet du périmètre.
+    perimetre_choisi: bool = False
+    # Temps antérieurs : hors périmètre (ni lus, ni cherchés un par un, ni supprimés).
+    temps_depuis: date | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +145,7 @@ def executer_cycle(
     *,
     mode: str,
     confirmer_suppressions: bool = False,
+    confirmer_creations: bool = False,
     echo: Echo | None = None,
 ) -> Resultat:
     ecrire = mode != "simuler"
@@ -161,9 +170,14 @@ def executer_cycle(
     statut, message = "réussi", ""
     pouls: Callable[[], None] = _Pouls(etat, cycle) if ecrire else (lambda: None)
     ctx.brancher_pouls(pouls)
+    deroule = _Cycle(ctx, adaptateurs, notes, etat, alertes, cycle, bilan, echo, confirmer_suppressions, pouls)
+    deroule.confirmer_creations = confirmer_creations
+    deroule.simulation = not ecrire
     try:
         ctx.avant_cycle()
-        _Cycle(ctx, adaptateurs, notes, etat, alertes, cycle, bilan, echo, confirmer_suppressions, pouls).derouler()
+        deroule.derouler()
+        if deroule.blocage:  # simulation : le plan complet est montré, le cycle reste « bloqué »
+            raise Disjoncteur(deroule.blocage)
     except Disjoncteur as e:
         statut, message = "bloqué", str(e)
         alertes.lever("disjoncteur", message, permanente=True)
@@ -198,6 +212,15 @@ def executer_cycle(
     return Resultat(cycle, statut, bilan, message, plan)
 
 
+def lire_les_deux(ctx: Contexte, etat: Etat) -> tuple[dict[str, dict[Cote, dict[str, Enreg]]], dict[Cote, set[str]]]:
+    """Tout lire des deux côtés, comme un cycle complet, sans rien écrire (pour « dolop apparier »)."""
+    lecture = _Cycle(ctx, ctx.adaptateurs, None, etat, Alertes(etat, envoi=None), 0, Bilan(), None, False)
+    lecture.simulation = True
+    ctx.avant_cycle()
+    lecture.lire()
+    return lecture.lus, lecture.geles
+
+
 class _Cycle:
     def __init__(
         self,
@@ -222,6 +245,10 @@ class _Cycle:
         self.bilan = bilan
         self.echo = echo
         self.confirmer = confirmer_suppressions
+        self.confirmer_creations = False
+        # En simulation, le disjoncteur n'arrête pas le déroulé : on veut voir tout ce qui serait fait.
+        self.simulation = False
+        self.blocage = ""
         self.lus: dict[str, dict[Cote, dict[str, Enreg]]] = {}
         self.absents: dict[str, dict[Cote, set[str]]] = {}
         self.geles: dict[Cote, set[str]] = {"dol": set(), "op": set()}
@@ -264,6 +291,8 @@ class _Cycle:
                 snap = lien.snap_de(c)
                 if r.champ_projet and snap is not None and str(snap.get(r.champ_projet)) in self.geles[c]:
                     continue  # objet d'un projet gelé : on ne le cherche pas, on n'y touche pas
+                if r is TEMPS and self.anterieur(snap):
+                    continue  # temps d'avant TEMPS_DEPUIS : hors périmètre, on n'y touche plus
                 objet = self.a[c][r.type].lire(identifiant)
                 if objet is None:
                     absents[c].add(identifiant)
@@ -271,9 +300,18 @@ class _Cycle:
                     lus[c][identifiant] = objet
         return absents
 
+    def anterieur(self, snap: Mapping[str, Any] | None) -> bool:
+        depuis = self.ctx.temps_depuis
+        return depuis is not None and snap is not None and str(snap.get("date") or "") < depuis.isoformat()
+
     def calculer_geles(self, liens: list[Lien], lus: dict[Cote, dict[str, Enreg]]) -> dict[Cote, set[str]]:
+        """Projets dont les objets ne bougent plus : clos ou archivés, supprimés d'un côté, rompus, ou
+        hors du périmètre choisi (ni coché d'un côté ni de l'autre)."""
         geles: dict[Cote, set[str]] = {"dol": set(), "op": set()}
+        relies: dict[Cote, set[str]] = {"dol": set(), "op": set()}
         for lien in liens:
+            relies["dol"].add(lien.dol_id)
+            relies["op"].add(lien.op_id)
             dol, op = lus["dol"].get(lien.dol_id), lus["op"].get(lien.op_id)
             if (
                 lien.rompu
@@ -281,16 +319,35 @@ class _Cycle:
                 or op is None
                 or not dol.champs.get("actif", True)
                 or not op.champs.get("actif", True)
+                or not (dol.perimetre or op.perimetre)
             ):
                 geles["dol"].add(lien.dol_id)
                 geles["op"].add(lien.op_id)
         for c in COTES:
-            geles[c].update(i for i, p in lus[c].items() if not p.champs.get("actif", True))
+            geles[c].update(
+                i
+                for i, p in lus[c].items()
+                if not p.champs.get("actif", True) or (not p.perimetre and i not in relies[c])
+            )
         return geles
+
+    def utilisateurs_concernes(self) -> dict[Cote, set[str]]:
+        """Utilisateurs membres, assignés ou auteurs de temps dans un projet non gelé, de leur côté."""
+        concernes: dict[Cote, set[str]] = {"dol": set(), "op": set()}
+        for type_, champ in (("membre", "utilisateur"), ("tache", "assigne"), ("temps", "utilisateur")):
+            for c in COTES:
+                for objet in self.lus.get(type_, {}).get(c, {}).values():
+                    projet, qui = objet.champs.get("projet"), objet.champs.get(champ)
+                    if projet is not None and qui and str(projet) not in self.geles[c]:
+                        concernes[c].add(str(qui))
+        return concernes
 
     # ------------------------------------------------------------------------- B
 
     def entree(self, r: Regles, traducteur: Traducteur) -> Entree:
+        creables = None
+        if r is UTILISATEUR and self.ctx.perimetre_choisi:
+            creables = self.utilisateurs_concernes()
         return Entree(
             regles=r,
             objets=self.lus[r.type],
@@ -299,30 +356,52 @@ class _Cycle:
             absents=self.absents[r.type],
             en_cours=self.etat.en_cours(),
             geles=self.geles,
+            creables=creables,
         )
 
+    def bloquer(self, message: str) -> None:
+        if not self.simulation:
+            raise Disjoncteur(message)
+        self.blocage = self.blocage or message
+
     def verifier_disjoncteur(self, traducteur: Traducteur) -> None:
-        total = 0
+        total = creations = relies_total = 0
         details: list[str] = []
+        details_creations: list[str] = []
         for r in ORDRE:
             actions = reconcilier(self.entree(r, traducteur))
+            relies = self.etat.compter_liens(r.type)
+            relies_total += relies
+            c = sum(isinstance(a, Creer) for a in actions)
+            if c:
+                creations += c
+                details_creations.append(f"{c} × {r.libelle}")
             n = sum(isinstance(a, Supprimer | Cloturer) for a in actions)
             if not n:
                 continue
             total += n
             details.append(f"{n} × {r.libelle}")
-            relies = sum(not lien.rompu for lien in self.etat.liens(r.type))
             if relies >= 10 and n * 100 > relies * self.ctx.seuil_pourcent and not self.confirmer:
-                raise Disjoncteur(
+                self.bloquer(
                     f"{n} suppressions de « {r.libelle} » prévues sur {relies} reliés "
                     f"(plus de {self.ctx.seuil_pourcent} %). Rien n'a été écrit. "
                     "Vérifier avec « dolop simuler », puis lancer « dolop une-fois --confirmer-suppressions »."
                 )
-        if total > self.ctx.seuil_suppressions and not self.confirmer:
-            raise Disjoncteur(
+        # Proportionnel : 5 suppressions en un cycle, c'est beaucoup pour 30 objets reliés, peu pour 30 000.
+        seuil = max(self.ctx.seuil_suppressions, math.ceil(relies_total * self.ctx.seuil_suppressions_pourcent / 100))
+        if total > seuil and not self.confirmer:
+            self.bloquer(
                 f"{total} suppressions ou clôtures prévues ({', '.join(details)}), "
-                f"au-delà du seuil de {self.ctx.seuil_suppressions}. Rien n'a été écrit. "
+                f"au-delà du seuil de {seuil}. Rien n'a été écrit. "
                 "Vérifier avec « dolop simuler », puis lancer « dolop une-fois --confirmer-suppressions »."
+            )
+        # Premier contact avec un outil rempli, périmètre mal réglé : tout serait recopié d'un coup.
+        if creations > self.ctx.seuil_creations and not self.confirmer_creations:
+            self.bloquer(
+                f"{creations} créations prévues ({', '.join(details_creations)}), "
+                f"au-delà du seuil de {self.ctx.seuil_creations}. Rien n'a été écrit. "
+                "Vérifier avec « dolop simuler --export simulation.csv » (et « dolop apparier » si les deux "
+                "outils contiennent déjà les mêmes projets), puis lancer « dolop une-fois --confirmer-creations »."
             )
 
     # ------------------------------------------------------------------------- C, D, E

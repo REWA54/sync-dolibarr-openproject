@@ -215,6 +215,10 @@ class Etat:
             rows = self.cx.execute("SELECT * FROM liens WHERE type = ? ORDER BY id", (type_,)).fetchall()
         return [self._lien(r) for r in rows]
 
+    def compter_liens(self, type_: str) -> int:
+        """Liens actifs d'un type, sans décoder les instantanés."""
+        return int(self.cx.execute("SELECT COUNT(*) FROM liens WHERE type = ? AND rompu = 0", (type_,)).fetchone()[0])
+
     def lien_par_paire(self, type_: str, dol_id: str, op_id: str) -> Lien | None:
         row = self.cx.execute(
             "SELECT * FROM liens WHERE type = ? AND dol_id = ? AND op_id = ?", (type_, dol_id, op_id)

@@ -180,6 +180,14 @@ class OpenProject:
             return None
         return _brut(objet.get(trouve[0])).strip() or None
 
+    def lire_booleen(self, objet: Mapping[str, Any], genre: str, nom: str) -> bool:
+        """Case à cocher (champ personnalisé booléen) ; absente ou vide : non cochée."""
+        trouve = self.champ(genre, nom)
+        if trouve is None:
+            return False
+        valeur = objet.get(trouve[0])
+        return valeur is True or str(valeur).strip().casefold() in ("true", "1", "t")
+
     def valeur_champ(self, genre: str, nom: str, valeur: str | None, projet: str | None = None) -> dict[str, Any]:
         propriete, type_ = self.champ_obligatoire(genre, nom, projet)
         if type_.casefold() == "formattable":
@@ -199,6 +207,16 @@ class OpenProject:
         if ident is None:
             raise ErreurApi(f"OpenProject : rôle « {nom} » introuvable (connus : {', '.join(sorted(self.roles()))})")
         return ident
+
+    def types_synchronises(self) -> list[str] | None:
+        """Identifiants des types de lots d'OPENPROJECT_TYPES ; None : tous les types."""
+        if not self.config.op_types:
+            return None
+        types = {cle_nom(t.get("name")): str(t["id"]) for t in self.pages("/types")}
+        manquants = [nom for nom in self.config.op_types if cle_nom(nom) not in types]
+        if manquants:
+            raise ErreurApi(f"OpenProject : type(s) de lot {', '.join(manquants)} introuvable(s) ({', '.join(types)})")
+        return [types[cle_nom(nom)] for nom in self.config.op_types]
 
     def type_par_defaut(self) -> str:
         if self._type is None:
@@ -360,6 +378,7 @@ class Projets(_Base):
             modifie_le=iso_vers_utc(p.get("updatedAt")),
             ref_autre=self.o.lire_champ(p, "projet", cfg.op_champ_ref),
             libelle=str(p.get("name") or p["id"]),
+            perimetre=cfg.perimetre == "tout" or self.o.lire_booleen(p, "projet", cfg.op_champ_synchro),
         )
 
     def lister(self) -> dict[str, Enreg]:
@@ -387,6 +406,9 @@ class Projets(_Base):
         corps.setdefault("name", "(sans titre)")
         if ref_autre:
             corps.update(self.o.valeur_champ("projet", self.o.config.op_champ_ref, ref_autre))
+        if self.o.config.perimetre == "choisi":
+            # Recopié d'un projet coché : coché aussi.
+            corps[self.o.champ_obligatoire("projet", self.o.config.op_champ_synchro)[0]] = True
         base = identifiant_op(champs.get("code"), str(corps["name"]))
         for n in range(1, 10):
             corps["identifier"] = base if n == 1 else f"{base[:96]}-{n}"
@@ -505,8 +527,13 @@ class Lots(_Base):
     def lister(self) -> dict[str, Enreg]:
         if self.o.aucun_projet_actif():
             return {}
-        lots = self.o.iter_pages("/work_packages", [], sortBy=json.dumps([["id", "asc"]]))
+        lots = self.o.iter_pages("/work_packages", self._filtres(), sortBy=json.dumps([["id", "asc"]]))
         return {str(w["id"]): self._enreg(w) for w in lots}
+
+    def _filtres(self) -> list[dict[str, Any]]:
+        # Une liste de filtres, même vide : sans elle, l'API n'envoie que les lots ouverts.
+        types = self.o.types_synchronises()
+        return [] if types is None else [{"type": {"operator": "=", "values": types}}]
 
     def lire(self, identifiant: str) -> Enreg | None:
         w = self._lire(f"/work_packages/{identifiant}")
@@ -609,7 +636,7 @@ class Temps(_Base):
             return {}
         exclus = self.o.exclus()
         resultat: dict[str, Enreg] = {}
-        for t in self.o.iter_pages("/time_entries", sortBy=json.dumps([["id", "asc"]])):
+        for t in self.o.iter_pages("/time_entries", self._filtres(), sortBy=json.dumps([["id", "asc"]])):
             if t.get("ongoing"):
                 continue  # chronomètre en cours : synchronisé à l'arrêt
             e = self._enreg(t)
@@ -620,6 +647,11 @@ class Temps(_Base):
     def lire(self, identifiant: str) -> Enreg | None:
         t = self._lire(f"/time_entries/{identifiant}")
         return None if t is None else self._enreg(t)
+
+    def _filtres(self) -> list[dict[str, Any]] | None:
+        """TEMPS_DEPUIS : l'historique antérieur n'est ni lu ni synchronisé."""
+        depuis = self.o.config.temps_depuis
+        return None if depuis is None else [{"spentOn": {"operator": "<>d", "values": [depuis.isoformat(), ""]}}]
 
     def _corps(self, champs: Mapping[str, Any]) -> dict[str, Any]:
         corps: dict[str, Any] = {}

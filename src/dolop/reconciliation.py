@@ -48,6 +48,9 @@ class Entree:
     en_cours: list[EnCours] = field(default_factory=list)
     # Projets gelés (clos, archivés ou supprimés d'un côté) : leurs objets ne bougent plus.
     geles: dict[Cote, set[str]] = field(default_factory=lambda: {"dol": set(), "op": set()})
+    # Si renseigné : seuls ces objets non reliés peuvent être recopiés de l'autre côté (utilisateurs
+    # concernés par un projet du périmètre choisi). Les autres peuvent toujours être appariés.
+    creables: dict[Cote, set[str]] | None = None
 
 
 def reconcilier(e: Entree) -> list[Action]:
@@ -214,11 +217,11 @@ class _Moteur:
             self.disparu(lien, survivant="op", objet=op)
         elif op is None:
             self.disparu(lien, survivant="dol", objet=dol)
-        elif not (self.gele("dol", dol) or self.gele("op", op)):
+        elif not (self.gele("dol", dol) or self.gele("op", op)) and (dol.perimetre or op.perimetre):
             self.comparer(lien, dol, op)
 
     def disparu(self, lien: Lien, survivant: Cote, objet: Enreg) -> None:
-        if self.gele(survivant, objet):
+        if self.gele(survivant, objet) or not objet.perimetre:
             return
         if self.r.suppression == "propager":
             self.actions.append(Supprimer(lien, survivant, objet))
@@ -262,8 +265,10 @@ class _Moteur:
         if vers_dol or vers_op or not a_jour:
             self.actions.append(Synchroniser(lien, dol, op, vers_dol, vers_op, tuple(conflits)))
 
-    def inactif_a_ignorer(self, objet: Enreg) -> bool:
-        return self.r.ignorer_inactifs and _inactif(objet)
+    def a_recopier(self, cote: Cote, objet: Enreg) -> bool:
+        if not objet.perimetre or (self.r.ignorer_inactifs and _inactif(objet)):
+            return False
+        return self.e.creables is None or objet.id in self.e.creables[cote]
 
     def trancher(self, dol: Enreg, op: Enreg) -> Cote:
         if dol.modifie_le and op.modifie_le and dol.modifie_le != op.modifie_le:
@@ -273,7 +278,7 @@ class _Moteur:
     def planifier_creations(self) -> None:
         refs_internes = [c.nom for c in self.r.champs if c.ref == self.r.type]
         for cote in COTES:
-            a_creer = [o for o in self.libres[cote].values() if not self.inactif_a_ignorer(o)]
+            a_creer = [o for o in self.libres[cote].values() if self.a_recopier(cote, o)]
             # Parents avant enfants : une sous-tâche a besoin que sa tâche parente existe déjà.
             ids = {o.id for o in a_creer}
             ordonnes: list[Enreg] = []

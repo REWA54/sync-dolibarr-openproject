@@ -77,6 +77,7 @@ class Dolibarr:
         self.config = config
         self.fuseau = config.fuseau
         self.attribut = f"options_{config.dolibarr_attribut}"
+        self.attribut_synchro = f"options_{config.dolibarr_attribut_synchro}"
         self.http = ClientHttp(
             "Dolibarr",
             config.dolibarr_url.rstrip("/") + "/api/index.php",
@@ -333,7 +334,8 @@ class Projets(_Base):
     embarque_ref = True
 
     def _enreg(self, p: Mapping[str, Any]) -> Enreg:
-        ref = _txt((p.get("array_options") or {}).get(self.d.attribut)) or None
+        options = p.get("array_options") or {}
+        ref = _txt(options.get(self.d.attribut)) or None
         return Enreg(
             id=str(p["id"]),
             champs={
@@ -346,6 +348,7 @@ class Projets(_Base):
             modifie_le=horodatage_vers_utc(p.get("date_m") or p.get("date_modification")),
             ref_autre=ref,
             libelle=f"{_txt(p.get('ref'))} {_txt(p.get('title'))}".strip(),
+            perimetre=self.d.config.perimetre == "tout" or bool(_int(options.get(self.d.attribut_synchro))),
         )
 
     def lister(self) -> dict[str, Enreg]:
@@ -365,8 +368,13 @@ class Projets(_Base):
             "socid": self.d.id_tiers(champs.get("client")),
             "usage_task": 1,
         }
+        options: dict[str, Any] = {}
         if ref_autre:
-            corps["array_options"] = {self.d.attribut: ref_autre}
+            options[self.d.attribut] = ref_autre
+        if self.d.config.perimetre == "choisi":
+            options[self.d.attribut_synchro] = 1  # recopié d'un projet coché : coché aussi
+        if options:
+            corps["array_options"] = options
         identifiant = str(self.d.http.post("/projects", corps))
         # Un projet naît brouillon ; on le valide pour pouvoir y saisir du temps.
         self.d.http.post(f"/projects/{identifiant}/validate", {"notrigger": 0})
@@ -664,7 +672,12 @@ class Temps(_Base):
         return self.d.pages("/projects/alltimespent", sortfield="et.rowid", **params)
 
     def lister(self) -> dict[str, Enreg]:
-        return self._lister(self.d.iter_pages("/projects/alltimespent", sortfield="et.rowid"))
+        return self._lister(self.d.iter_pages("/projects/alltimespent", sortfield="et.rowid", **self._depuis()))
+
+    def _depuis(self) -> dict[str, str]:
+        """TEMPS_DEPUIS : l'historique antérieur n'est ni lu ni synchronisé."""
+        depuis = self.d.config.temps_depuis
+        return {} if depuis is None else {"sqlfilters": f"(et.element_date:>=:'{depuis.isoformat()}')"}
 
     def _lister(self, lignes: Iterable[Mapping[str, Any]]) -> dict[str, Enreg]:
         exclus = self.d.exclus()

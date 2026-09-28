@@ -26,6 +26,25 @@ Format [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), numérotation [
   `SANTE_MINUTES` (15). `DOLIBARR_ATTRIBUT` est désormais refusé s'il contient autre chose que des
   lettres, chiffres et `_` (il entre dans un filtre de l'API).
 
+### Outils remplis — étape 2 : choisir, relier, confirmer
+Procédure complète : [`docs/outils-remplis.md`](docs/outils-remplis.md).
+- **Périmètre choisi** (`PERIMETRE=choisi`) : seuls les projets cochés « à synchroniser » d'un côté
+  ou de l'autre circulent, avec leurs tâches, temps et membres ; un projet recopié est coché de
+  l'autre côté ; un projet relié décoché des deux côtés se fige sans rien perdre. Un utilisateur
+  n'est recopié que s'il est concerné par un projet coché. Par défaut (`tout`), rien ne change.
+- `OPENPROJECT_TYPES` : types de lots synchronisés. `TEMPS_DEPUIS` : les temps antérieurs ne sont ni
+  lus, ni cherchés un par un, ni supprimés.
+- **`dolop apparier`** : propose dans un fichier CSV les projets, tâches et temps déjà présents des
+  deux côtés (même titre, même identité), à relire puis appliquer (`--appliquer f.csv --oui`) ; les
+  noms en double ne sont jamais devinés. Sans cela, le premier cycle les recopiait en double.
+- **Disjoncteur de créations** : au-delà de `SEUIL_CREATIONS` (50) créations prévues, rien n'est écrit
+  sans `dolop une-fois --confirmer-creations`.
+- **Seuil de suppressions proportionnel** : le plus grand de `SEUIL_SUPPRESSIONS` (5) et de
+  `SEUIL_SUPPRESSIONS_POURCENT` (1 %) des objets reliés. Le seuil par type (20 %) ne change pas.
+- `dolop simuler` montre le plan complet même quand le disjoncteur bloquerait le cycle (statut
+  « bloqué », avec la raison).
+- `dolop verifier` contrôle les cases du périmètre choisi et les types de lots.
+
 ### Chaîne CI/CD
 - CI/CD sur une forge Forgejo auto-hébergée, sans GitHub (`.forgejo/workflows/ci.yml`,
   [`docs/forgejo.md`](docs/forgejo.md)) : mêmes vérifications, jobs sur un runner en mode hôte, outils

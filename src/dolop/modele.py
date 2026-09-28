@@ -34,6 +34,10 @@ class Enreg:
     # (attribut supplémentaire Dolibarr, champ personnalisé OpenProject).
     ref_autre: str | None = None
     libelle: str = ""
+    # Périmètre choisi (PERIMETRE=choisi) : projet coché « à synchroniser » de son côté. Un objet hors
+    # périmètre peut être apparié à son jumeau, jamais recopié ; relié, il ne bouge que si l'un des
+    # deux côtés est coché.
+    perimetre: bool = True
 
 
 @dataclass(frozen=True)

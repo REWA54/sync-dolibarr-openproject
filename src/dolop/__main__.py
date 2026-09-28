@@ -2,9 +2,11 @@
 
 dolop verifier                         chaque prérequis de la mise en route (lecture seule)
 dolop simuler [--export fichier.csv]   ce qui serait fait, sans rien écrire (par défaut)
-dolop une-fois [--confirmer-suppressions]  un cycle réel
+dolop une-fois [--confirmer-suppressions] [--confirmer-creations]  un cycle réel
 dolop service                          un cycle toutes les INTERVALLE_SECONDES
 dolop rapport                          liens, derniers cycles, alertes en cours
+dolop apparier [--fichier f.csv]       proposer les objets déjà présents des deux côtés à relier
+dolop apparier --appliquer f.csv [--oui]  relier les paires relues (montre d'abord)
 dolop annuler <cycle> [--oui]          supprimer ce qu'un cycle a créé (montre d'abord)
 dolop sauvegarder [fichier]            copie cohérente de la base d'état, même pendant un cycle
 dolop sante                            code 0 si un cycle a réussi, ou avance, depuis moins de 15 min
@@ -29,11 +31,12 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+from . import appariement
 from .adaptateurs import Adaptateur
 from .alertes import TITRE, Alertes, envoi_webhook
 from .config import Config, ErreurConfig
 from .conversions import age
-from .cycle import Contexte, Resultat, executer_cycle
+from .cycle import Contexte, Resultat, executer_cycle, lire_les_deux
 from .dolibarr import Dolibarr
 from .dolibarr import adaptateurs as adaptateurs_dol
 from .etat import BaseIllisible, Etat
@@ -72,7 +75,11 @@ def construire(config: Config) -> Contexte:
         brancher_pouls=brancher_pouls,
         seuil_suppressions=config.seuil_suppressions,
         seuil_pourcent=config.seuil_pourcent,
+        seuil_suppressions_pourcent=config.seuil_suppressions_pourcent,
+        seuil_creations=config.seuil_creations,
         fuseau=config.fuseau,
+        perimetre_choisi=config.perimetre == "choisi",
+        temps_depuis=config.temps_depuis,
     )
 
 
@@ -123,7 +130,7 @@ def _alertes(config: Config, etat: Etat) -> Alertes:
     return Alertes(etat, envoi_webhook(config.webhook) if config.webhook else None)
 
 
-def cmd_une_fois(config: Config, etat: Etat, confirmer: bool) -> int:
+def cmd_une_fois(config: Config, etat: Etat, confirmer: bool, confirmer_creations: bool = False) -> int:
     with verrou(config.verrou, attente=ATTENTE_CYCLE):
         r = executer_cycle(
             construire(config),
@@ -131,6 +138,7 @@ def cmd_une_fois(config: Config, etat: Etat, confirmer: bool) -> int:
             _alertes(config, etat),
             mode="une-fois",
             confirmer_suppressions=confirmer,
+            confirmer_creations=confirmer_creations,
             echo=print,
         )
     afficher(r)
@@ -221,6 +229,32 @@ def cmd_rapport(etat: Etat) -> int:
     print(f"\nAlertes en cours : {len(alertes) or 'aucune'}")
     for a in alertes:
         print(f"  • {a['message']}")
+    return 0
+
+
+def cmd_apparier(config: Config, etat: Etat, fichier: str | None, appliquer: str | None, oui: bool) -> int:
+    if appliquer is None:
+        chemin = Path(fichier) if fichier else config.base.parent / "appariement.csv"
+        print("Lecture des deux outils (rien n'est écrit)…")
+        ctx = construire(config)
+        lus, geles = lire_les_deux(ctx, etat)
+        propositions, doutes = appariement.proposer(lus, etat.liens(), geles, ctx.convertisseurs)
+        appariement.ecrire(propositions, chemin)
+        for type_, n in sorted(Counter(p.type for p in propositions).items()):
+            print(f"  {type_:<8} {n} paire(s) proposée(s)")
+        for doute in doutes:
+            print(f"  ? {doute}")
+        print(f"\n{len(propositions)} proposition(s) dans {chemin}. Relire, retirer les lignes fausses, puis :")
+        print(f"  dolop apparier --appliquer {chemin}          (montre ce qui sera relié)")
+        print(f"  dolop apparier --appliquer {chemin} --oui    (relie)")
+        return 0
+    propositions = appariement.lire(Path(appliquer))
+    print(("Appariement" if oui else "Serait relié (ajouter --oui pour le faire)") + f" — {appliquer} :")
+    with verrou(config.verrou, attente=ATTENTE_CYCLE):
+        ctx = construire(config)
+        n = appariement.appliquer(propositions, ctx.adaptateurs, etat, oui=oui)
+    etat_final = "reliée(s)" if oui else "à relier"
+    print(f"\n{n} paire(s) {etat_final}. Ensuite : « dolop simuler » pour voir les champs alignés.")
     return 0
 
 
@@ -315,8 +349,13 @@ def main(argv: list[str] | None = None) -> int:
     sim.add_argument("--export", metavar="FICHIER", help="liste complète des écritures prévues, en CSV")
     une = sous.add_parser("une-fois")
     une.add_argument("--confirmer-suppressions", action="store_true")
+    une.add_argument("--confirmer-creations", action="store_true")
     sous.add_parser("service")
     sous.add_parser("rapport")
+    app = sous.add_parser("apparier")
+    app.add_argument("--fichier", help="où écrire les propositions (défaut : appariement.csv près de la base)")
+    app.add_argument("--appliquer", metavar="FICHIER", help="relier les paires de ce fichier relu")
+    app.add_argument("--oui", action="store_true")
     ann = sous.add_parser("annuler")
     ann.add_argument("cycle", type=int)
     ann.add_argument("--oui", action="store_true")
@@ -367,9 +406,11 @@ def _executer(commande: str, args: argparse.Namespace, config: Config) -> int:
         if commande == "simuler":
             return cmd_simuler(config, etat, getattr(args, "export", None))
         if commande == "une-fois":
-            return cmd_une_fois(config, etat, args.confirmer_suppressions)
+            return cmd_une_fois(config, etat, args.confirmer_suppressions, args.confirmer_creations)
         if commande == "service":
             return cmd_service(config, etat)
+        if commande == "apparier":
+            return cmd_apparier(config, etat, args.fichier, args.appliquer, args.oui)
         return cmd_annuler(config, etat, args.cycle, args.oui)
 
 
