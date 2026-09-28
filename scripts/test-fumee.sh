@@ -47,7 +47,7 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 grep -q "service .* démarré" <<<"$(journal)" || echec "le service n'a pas démarré"
-grep -q "cycle 1 : échec" <<<"$(journal)" || echec "aucun cycle en 30 s"
+grep -q "cycle 1 (complète) : échec" <<<"$(journal)" || echec "aucun cycle en 30 s (ou premier cycle non complet)"
 grep -q "base d'état sauvegardée" <<<"$(journal)" || echec "aucune sauvegarde après le premier cycle"
 [ "$(docker inspect -f '{{.State.Running}}' "$nom")" = true ] || echec "le service s'est arrêté après une panne"
 
