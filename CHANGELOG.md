@@ -25,6 +25,9 @@ existe déjà, ne relire que ce qui change.
   de doublon après une création interrompue, même en lecture incrémentale.
 - Les alertes ponctuelles ne sont tenues pour résolues qu'après une lecture complète (sinon un
   problème persistant serait éteint puis renvoyé chaque heure).
+- Objet supprimé d'un côté et modifié de l'autre dans l'heure : le cycle incrémental ne lève pas de
+  fausse alerte (404 attendu) ; la lecture complète suivante recopie la suppression.
+- `dolop apparier` explique pourquoi il s'arrête si une liste revient vide (droits du compte technique).
 - `MARGE_DOLIBARR_MINUTES` (180) : la base de Dolibarr compare les dates dans son propre fuseau.
 - `dolop rapport` donne la dernière lecture complète ; le journal dit le type de chaque cycle.
 - L'index des liens ne décode plus les instantanés.

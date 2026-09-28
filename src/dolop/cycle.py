@@ -521,6 +521,7 @@ class _Cycle:
             self.echo,
         )
         executeur.pouls = self.pouls
+        executeur.tolerer_disparus = self.depuis is not None
         return executeur
 
     def synchroniser_commentaires(self) -> None:

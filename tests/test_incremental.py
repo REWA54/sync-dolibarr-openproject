@@ -120,6 +120,19 @@ def test_alerte_dun_objet_non_relu_ni_eteinte_ni_renvoyee() -> None:
     assert sum("Inconnu" in m for _, m in b.envoyees) == 1
 
 
+def test_supprime_dun_cote_modifie_de_lautre_ni_panne_ni_alerte_puis_suppression() -> None:
+    b, ids = _banc_avec_temps(n=0)
+    service(b)
+    del b.op["tache"].objets[ids["ot"]]
+    b.dol["tache"].changer(ids["dt"], titre="Maquette v2")
+    r = service(b)
+    assert r.lecture == "incrémentale" and not r.bilan.erreurs
+    assert b.envoyees == [], "pas de fausse alerte : la lecture complète s'en chargera"
+    b.horloge.avancer(61)
+    service(b)
+    assert ids["dt"] not in b.dol["tache"].objets, "la suppression est recopiée à la lecture complète"
+
+
 # ---------------------------------------------------------------------- adaptateurs
 
 

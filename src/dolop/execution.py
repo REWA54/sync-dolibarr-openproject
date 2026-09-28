@@ -98,6 +98,9 @@ class Executeur:
         self.echo = echo or (lambda _m: None)
         self.bilan = Bilan()
         self.pouls: Callable[[], None] = lambda: None
+        # Lecture incrémentale : un objet disparu depuis son dernier instantané répond 404 quand on le
+        # modifie. Ce n'est pas une panne : la lecture complète suivante constate la suppression.
+        self.tolerer_disparus = False
 
     # ----------------------------------------------------------------------- outils
 
@@ -130,12 +133,21 @@ class Executeur:
             self.pouls()
             try:
                 self._appliquer(action)
+            except ErreurApi as e:
+                if not (self.tolerer_disparus and e.statut == 404 and isinstance(action, Synchroniser)):
+                    self._echec(action, e)
+                    continue
+                log.info("%s : objet disparu, vu à la prochaine lecture complète (%s)", self.r.libelle, e)
             except Exception as e:  # un objet en échec ne bloque pas les autres
-                message = f"{self.r.libelle} — {type(action).__name__} : {e}"
-                log.exception(message)
-                self.bilan.erreurs.append(message)
-                self.alertes.lever(f"erreur:{self.r.type}:{_cle_action(action)}", message)
+                self._echec(action, e)
         return self.bilan
+
+    def _echec(self, action: Action, e: Exception) -> None:
+        """Un objet en échec ne bloque pas les autres : il est noté, et une alerte part."""
+        message = f"{self.r.libelle} — {type(action).__name__} : {e}"
+        log.exception(message)
+        self.bilan.erreurs.append(message)
+        self.alertes.lever(f"erreur:{self.r.type}:{_cle_action(action)}", message)
 
     def _appliquer(self, action: Action) -> None:
         match action:

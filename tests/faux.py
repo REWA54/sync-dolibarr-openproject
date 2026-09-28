@@ -110,6 +110,8 @@ class FauxAdaptateur:
         return identifiant
 
     def modifier(self, identifiant: str, champs: Mapping[str, Any]) -> str | None:
+        if identifiant not in self.objets:
+            raise ErreurApi(f"{self.type} {identifiant} → 404 : introuvable", 404)
         self.objets[identifiant].update(self.stockage(dict(champs)))
         self.maj[identifiant] = self.horloge.t if self.horodate else None
         self.touches[identifiant] = self.horloge.t

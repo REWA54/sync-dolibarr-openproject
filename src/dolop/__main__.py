@@ -36,7 +36,7 @@ from .adaptateurs import Adaptateur
 from .alertes import TITRE, Alertes, envoi_webhook
 from .config import Config, ErreurConfig
 from .conversions import age
-from .cycle import Contexte, Resultat, executer_cycle, lire_les_deux
+from .cycle import Contexte, Disjoncteur, Resultat, executer_cycle, lire_les_deux
 from .dolibarr import Dolibarr
 from .dolibarr import adaptateurs as adaptateurs_dol
 from .etat import BaseIllisible, Etat
@@ -243,7 +243,11 @@ def cmd_apparier(config: Config, etat: Etat, fichier: str | None, appliquer: str
         chemin = Path(fichier) if fichier else config.base.parent / "appariement.csv"
         print("Lecture des deux outils (rien n'est écrit)…")
         ctx = construire(config)
-        lus, geles = lire_les_deux(ctx, etat)
+        try:
+            lus, geles = lire_les_deux(ctx, etat)
+        except Disjoncteur as e:
+            print(f"Lecture interrompue : {e}", file=sys.stderr)
+            return 1
         propositions, doutes = appariement.proposer(lus, etat.liens(), geles, ctx.convertisseurs)
         appariement.ecrire(propositions, chemin)
         for type_, n in sorted(Counter(p.type for p in propositions).items()):
