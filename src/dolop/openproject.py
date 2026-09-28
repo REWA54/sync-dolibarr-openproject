@@ -12,7 +12,7 @@ Faits vérifiés dans le code installé (17.8.0) :
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -67,6 +67,7 @@ class OpenProject:
             entetes=entetes,
             auth=("apikey", config.openproject_cle),
             transport=transport,
+            delai=config.delai_http,
         )
         self._champs: dict[tuple[str, str], tuple[str, str]] = {}
         self._schemas_vus: set[tuple[str, str, str | None]] = set()
@@ -82,18 +83,27 @@ class OpenProject:
 
     # ------------------------------------------------------------------------ lectures
 
-    def pages(self, chemin: str, filtres: list[Any] | None = None, **params: Any) -> list[dict[str, Any]]:
+    def iter_pages(self, chemin: str, filtres: list[Any] | None = None, **params: Any) -> Iterator[dict[str, Any]]:
+        """Les objets d'une collection, page par page : aucune page n'est gardée une fois lue.
+
+        Un lot pèse une vingtaine de Kio en mémoire : garder toutes les pages avant de les convertir
+        dépassait la mémoire du conteneur vers 10 000 lots.
+        """
         if filtres is not None:
             params["filters"] = json.dumps(filtres)
-        resultat: list[dict[str, Any]] = []
-        for page in range(1, 10_000):
-            reponse = self.http.get(chemin, pageSize=500, offset=page, **params)
+        lus = 0
+        for page in range(1, 100_000):
+            reponse = self.http.get(chemin, pageSize=self.config.taille_page_openproject, offset=page, **params)
             elements = (reponse.get("_embedded") or {}).get("elements") or []
-            resultat.extend(elements)
+            lus += len(elements)
+            yield from elements
             total = reponse.get("total")
-            if not elements or (total is not None and len(resultat) >= int(total)):
-                return resultat
+            if not elements or (total is not None and lus >= int(total)):
+                return
         raise ErreurApi(f"OpenProject GET {chemin} : pagination sans fin")
+
+    def pages(self, chemin: str, filtres: list[Any] | None = None, **params: Any) -> list[dict[str, Any]]:
+        return list(self.iter_pages(chemin, filtres, **params))
 
     def projets(self, actifs: bool) -> list[dict[str, Any]]:
         cle = "t" if actifs else "f"
@@ -436,7 +446,7 @@ class Membres(_Base):
             return {}
         exclus = self.o.exclus()
         resultat: dict[str, Enreg] = {}
-        for m in self.o.pages("/memberships"):
+        for m in self.o.iter_pages("/memberships"):
             e = self._enreg(m)
             if e is not None and e.champs["utilisateur"] not in exclus:
                 resultat[e.id] = e
@@ -495,7 +505,7 @@ class Lots(_Base):
     def lister(self) -> dict[str, Enreg]:
         if self.o.aucun_projet_actif():
             return {}
-        lots = self.o.pages("/work_packages", [], sortBy=json.dumps([["id", "asc"]]))
+        lots = self.o.iter_pages("/work_packages", [], sortBy=json.dumps([["id", "asc"]]))
         return {str(w["id"]): self._enreg(w) for w in lots}
 
     def lire(self, identifiant: str) -> Enreg | None:
@@ -599,7 +609,7 @@ class Temps(_Base):
             return {}
         exclus = self.o.exclus()
         resultat: dict[str, Enreg] = {}
-        for t in self.o.pages("/time_entries", sortBy=json.dumps([["id", "asc"]])):
+        for t in self.o.iter_pages("/time_entries", sortBy=json.dumps([["id", "asc"]])):
             if t.get("ongoing"):
                 continue  # chronomètre en cours : synchronisé à l'arrêt
             e = self._enreg(t)

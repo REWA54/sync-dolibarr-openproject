@@ -7,6 +7,7 @@ Chaque secret (jetons, webhook) peut aussi être lu dans un fichier : ``DOLIBARR
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +47,13 @@ class Config:
     sauvegardes: int = 7
     # Âge au-delà duquel l'historique des cycles est purgé.
     conservation_jours: int = 180
+    # Volumes importants : taille des pages lues, délai d'attente d'une réponse, lectures simultanées.
+    taille_page_dolibarr: int = 100
+    taille_page_openproject: int = 200
+    delai_http: int = 60
+    lectures_paralleles: int = 4
+    # « dolop sante » : délai sans cycle réussi (ni cycle en cours qui avance) avant de passer au rouge.
+    sante_minutes: int = 15
 
     @property
     def fuseau(self) -> ZoneInfo:
@@ -121,6 +129,11 @@ class Config:
         if webhook and urlsplit(webhook).scheme not in ("http", "https"):
             raise ErreurConfig("ALERTE_WEBHOOK_URL doit être une adresse http(s)://…")
 
+        # Le code de l'attribut entre dans un filtre de l'API Dolibarr : les caractères de Dolibarr, sans plus.
+        attribut = texte("DOLIBARR_ATTRIBUT", "openproject_id")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", attribut):
+            raise ErreurConfig(f"DOLIBARR_ATTRIBUT : code d'attribut invalide {attribut!r} (lettres, chiffres, _)")
+
         exclus = env.get("EXCLURE_LOGINS", "admin")
         return cls(
             dolibarr_url=url("DOLIBARR_URL"),
@@ -128,7 +141,7 @@ class Config:
             openproject_url=url("OPENPROJECT_URL"),
             openproject_cle=str(secrets["OPENPROJECT_API_KEY"]),
             openproject_hote=optionnel("OPENPROJECT_HOST"),
-            dolibarr_attribut=texte("DOLIBARR_ATTRIBUT", "openproject_id"),
+            dolibarr_attribut=attribut,
             op_champ_ref=texte("OPENPROJECT_CHAMP_REF", "ID Dolibarr"),
             op_champ_client=texte("OPENPROJECT_CHAMP_CLIENT", "Client"),
             op_role_chef=texte("OPENPROJECT_ROLE_CHEF", "Project admin"),
@@ -145,6 +158,11 @@ class Config:
             fuseau_nom=fuseau_nom,
             sauvegardes=entier("SAUVEGARDES", 7, minimum=0),
             conservation_jours=entier("CONSERVATION_JOURS", 180, minimum=7),
+            taille_page_dolibarr=entier("TAILLE_PAGE_DOLIBARR", 100, minimum=10, maximum=1000),
+            taille_page_openproject=entier("TAILLE_PAGE_OPENPROJECT", 200, minimum=10, maximum=1000),
+            delai_http=entier("DELAI_HTTP_SECONDES", 60, minimum=5, maximum=600),
+            lectures_paralleles=entier("LECTURES_PARALLELES", 4, minimum=1, maximum=16),
+            sante_minutes=entier("SANTE_MINUTES", 15, minimum=5, maximum=1440),
         )
 
 

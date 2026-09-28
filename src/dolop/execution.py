@@ -97,6 +97,7 @@ class Executeur:
         self.cycle = cycle
         self.echo = echo or (lambda _m: None)
         self.bilan = Bilan()
+        self.pouls: Callable[[], None] = lambda: None
 
     # ----------------------------------------------------------------------- outils
 
@@ -126,6 +127,7 @@ class Executeur:
 
     def appliquer(self, actions: Iterable[Action]) -> Bilan:
         for action in actions:
+            self.pouls()
             try:
                 self._appliquer(action)
             except Exception as e:  # un objet en échec ne bloque pas les autres

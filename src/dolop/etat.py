@@ -289,6 +289,10 @@ class Etat:
     def derniers_cycles(self, n: int = 10) -> list[sqlite3.Row]:
         return self.cx.execute("SELECT * FROM cycles ORDER BY id DESC LIMIT ?", (n,)).fetchall()
 
+    def statut_dernier_cycle_termine(self) -> str | None:
+        row = self.cx.execute("SELECT statut FROM cycles WHERE fin IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+        return None if row is None else str(row["statut"])
+
     def echecs_consecutifs(self) -> int:
         n = 0
         for row in self.cx.execute("SELECT statut FROM cycles WHERE mode = 'service' ORDER BY id DESC LIMIT 50"):
@@ -361,3 +365,6 @@ class Etat:
 
     def poser_meta(self, cle: str, valeur: str) -> None:
         self.cx.execute("INSERT OR REPLACE INTO meta (cle, valeur) VALUES (?, ?)", (cle, valeur))
+
+    def effacer_meta(self, cle: str) -> None:
+        self.cx.execute("DELETE FROM meta WHERE cle = ?", (cle,))

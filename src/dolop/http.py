@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -40,15 +41,18 @@ class ClientHttp:
         transport: httpx.BaseTransport | None = None,
         essais: int = 3,
         pause: float = 1.5,
+        delai: float = 60.0,
     ):
         self.nom = nom
         self.essais = essais
         self.pause = pause
+        # Appelé à chaque réponse : signe de vie d'un long cycle pour « dolop sante ».
+        self.pouls: Callable[[], None] | None = None
         self.http = httpx.Client(
             base_url=base.rstrip("/"),
             headers={"Accept": "application/json", **(entetes or {})},
             auth=auth,
-            timeout=httpx.Timeout(30.0, connect=10.0),
+            timeout=httpx.Timeout(delai, connect=10.0),
             transport=transport,
             follow_redirects=False,
         )
@@ -91,6 +95,8 @@ class ClientHttp:
                 log.warning("%s %s %s → %s — nouvel essai", self.nom, methode, chemin, reponse.status_code)
                 time.sleep(self._attente(reponse, essai))
                 continue
+            if self.pouls is not None:
+                self.pouls()
             if reponse.status_code >= 400:
                 raise self._erreur(methode, chemin, reponse)
             if reponse.status_code == 204 or not reponse.content:

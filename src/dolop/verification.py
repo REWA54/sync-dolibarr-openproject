@@ -99,13 +99,21 @@ def _dolibarr(config: Config) -> Iterator[Point]:
             f"Dolibarr : attribut « {config.dolibarr_attribut} » sur les {quoi}",
             f"le créer dans /projet/admin/{ecran} (code exact : {config.dolibarr_attribut})",
         )
-    for chemin, quoi in (("/projects", "projets"), ("/tasks", "tâches"), ("/thirdparties", "tiers")):
-        yield _essai(f"Dolibarr : lecture des {quoi}", "droits insuffisants", partial(d.pages, chemin))[0]
-    yield _essai(
-        "Dolibarr : lecture des temps passés",
-        "droits insuffisants",
-        lambda: d.pages("/projects/alltimespent"),
-    )[0]
+    # Une seule page suffit à prouver le droit de lecture ; tout lire serait long sur un Dolibarr rempli.
+    for chemin, quoi in (
+        ("/projects", "projets"),
+        ("/tasks", "tâches"),
+        ("/thirdparties", "tiers"),
+        ("/projects/alltimespent", "temps passés"),
+    ):
+        yield _essai(f"Dolibarr : lecture des {quoi}", "droits insuffisants", partial(_premiere_page, d, chemin))[0]
+
+
+def _premiere_page(d: Dolibarr, chemin: str) -> Any:
+    try:
+        return d.http.get(chemin, limit=1)
+    except Introuvable:
+        return []  # certaines versions répondent 404 à une liste vide
 
 
 def _openproject(config: Config) -> Iterator[Point]:

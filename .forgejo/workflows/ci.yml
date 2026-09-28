@@ -220,14 +220,17 @@ jobs:
         run: scripts/test-fumee.sh "$LOCALE"
       - name: Publier dans le registre de la forge
         if: env.PUBLIER == 'true'
+        # Le jeton automatique d'un job ne peut pas écrire dans le registre (401) : il faut un jeton
+        # du propriétaire limité à « package : lecture et écriture », rangé dans le secret
+        # REGISTRE_JETON du dépôt (voir docs/forgejo.md).
         env:
-          JETON: ${{ secrets.GITHUB_TOKEN }}
-          ACTEUR: ${{ github.actor }}
+          JETON: ${{ secrets.REGISTRE_JETON }}
           SERVEUR: ${{ github.server_url }}
           PROPRIETAIRE: ${{ github.repository_owner }}
           COMMIT: ${{ github.sha }}
           REF: ${{ github.ref }}
         run: |
+          [ -n "$JETON" ] || { echo "secret REGISTRE_JETON absent : rien n'est publié (voir docs/forgejo.md)"; exit 1; }
           registre="${SERVEUR#*://}"
           image="${registre}/${PROPRIETAIRE,,}/sync-dolibarr-openproject"
           etiquettes=("sha-${COMMIT:0:7}")
@@ -239,7 +242,7 @@ jobs:
           DOCKER_CONFIG="$(mktemp -d)"
           export DOCKER_CONFIG
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT
-          printf '%s' "$JETON" | docker login "$registre" -u "$ACTEUR" --password-stdin
+          printf '%s' "$JETON" | docker login "$registre" -u "$PROPRIETAIRE" --password-stdin
           for etiquette in "${etiquettes[@]}"; do
             docker tag "$LOCALE" "${image}:${etiquette}"
             docker push -q "${image}:${etiquette}"

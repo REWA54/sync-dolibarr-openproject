@@ -97,8 +97,10 @@ def test_dolibarr_404_vaut_absent_mais_403_leve() -> None:
 
 
 def test_dolibarr_projet_canonique() -> None:
+    """Un Dolibarr rempli a des milliers de tiers : seule la fiche du client du projet est lue."""
     s = Serveur()
-    s.route("GET", "/thirdparties", (200, [{"id": "29", "name": "Acme", "code_client": "CU2501-0002"}]))
+    s.route("GET", "/thirdparties", (500, {"error": "la liste complète des tiers ne doit pas être lue"}))
+    s.route("GET", "/thirdparties/29", (200, {"id": "29", "name": "Acme", "code_client": "CU2501-0002"}))
     projet = {
         "id": "2",
         "ref": "PJ2501-0002",
@@ -110,7 +112,7 @@ def test_dolibarr_projet_canonique() -> None:
         "array_options": {"options_openproject_id": "41"},
     }
     s.route("GET", "/projects", (200, [projet]))
-    _, a = dolibarr(s)
+    d, a = dolibarr(s)
     e = a["projet"].lister()["2"]
     assert e.champs == {
         "titre": "Site Acme",
@@ -120,6 +122,9 @@ def test_dolibarr_projet_canonique() -> None:
         "code": "PJ2501-0002",
     }
     assert e.ref_autre == "41"
+    d.nouveau_cycle(complet=False)
+    a["projet"].lister()
+    assert sum("/thirdparties/29" in c for _, c, _ in s.appels) == 1, "fiche gardée d'un cycle incrémental à l'autre"
 
 
 def test_dolibarr_client_tape_dans_openproject() -> None:

@@ -146,6 +146,10 @@ arrête le service au démarrage avec un message clair, plutôt que de le laisse
 | `BASE_ETAT` | `/data/etat.sqlite` | mémoire du service |
 | `SAUVEGARDES` | `7` | sauvegardes quotidiennes gardées dans `/data/sauvegardes` (0 : aucune) |
 | `CONSERVATION_JOURS` | `180` | âge au-delà duquel l'historique des cycles est purgé |
+| `TAILLE_PAGE_DOLIBARR` / `TAILLE_PAGE_OPENPROJECT` | `100` / `200` | objets par page lue (10 à 1000) |
+| `DELAI_HTTP_SECONDES` | `60` | attente maximale d'une réponse (une grosse page d'OpenProject peut être lente) |
+| `LECTURES_PARALLELES` | `4` | lectures simultanées de ce qui ne se lit qu'objet par objet (1 à 16) |
+| `SANTE_MINUTES` | `15` | délai sans cycle réussi, ni cycle qui avance, avant que `dolop sante` passe au rouge |
 
 Avec Docker Compose, ces variables sont alimentées par celles préfixées `DOLOP_` du fichier `.env`
 (voir [`compose.env.exemple`](compose.env.exemple)).
@@ -155,14 +159,14 @@ Avec Docker Compose, ces variables sont alimentées par celles préfixées `DOLO
 | Commande | Effet |
 |---|---|
 | `dolop verifier` | chaque prérequis de la mise en route, en lecture seule |
-| `dolop simuler` | ce qui serait fait, sans rien écrire (commande par défaut) |
+| `dolop simuler [--export fichier.csv]` | ce qui serait fait, sans rien écrire (commande par défaut) : résumé, 40 premières lignes, liste complète en CSV |
 | `dolop une-fois` | un cycle réel |
 | `dolop une-fois --confirmer-suppressions` | après un disjoncteur, une fois la simulation vérifiée |
 | `dolop service` | boucle (commande du conteneur) |
 | `dolop rapport` | liens, derniers cycles, alertes en cours |
 | `dolop annuler <n° de cycle> [--oui]` | montre ce qu'un cycle a créé ; `--oui` le supprime |
 | `dolop sauvegarder [fichier]` | copie cohérente de la base d'état, même pendant un cycle |
-| `dolop sante` | code 0 si un cycle a réussi il y a moins de 15 min (sonde Docker) |
+| `dolop sante` | code 0 si un cycle a réussi il y a moins de 15 min, ou si un long cycle avance encore (sonde Docker) |
 | `dolop --version` | version installée |
 
 Dans le conteneur : `docker exec -it sync-dolibarr-openproject dolop rapport`.

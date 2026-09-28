@@ -64,7 +64,8 @@ class Simulateur:
         self.type = reel.type
         self.cote = cote
         self.crees: dict[str, dict[str, Any]] = {}
-        self.ecritures: list[str] = []
+        # (action, détail) de chaque écriture qui aurait été faite.
+        self.ecritures: list[tuple[str, str]] = []
 
     def lister(self) -> dict[str, Enreg]:
         return self.reel.lister()
@@ -77,24 +78,24 @@ class Simulateur:
     def creer(self, champs: Mapping[str, Any], ref_autre: str | None) -> str:
         identifiant = f"~{next(self._compteur)}"
         self.crees[identifiant] = dict(champs)
-        self.ecritures.append(f"créer {identifiant} {dict(champs)}")
+        self.ecritures.append(("créer", f"{identifiant} {dict(champs)}"))
         return identifiant
 
     def modifier(self, identifiant: str, champs: Mapping[str, Any]) -> str | None:
         if identifiant in self.crees:
             self.crees[identifiant].update(champs)
-        self.ecritures.append(f"modifier {identifiant} {dict(champs)}")
+        self.ecritures.append(("modifier", f"{identifiant} {dict(champs)}"))
         return None
 
     def supprimer(self, identifiant: str) -> None:
-        self.ecritures.append(f"supprimer {identifiant}")
+        self.ecritures.append(("supprimer", identifiant))
 
     def cloturer(self, identifiant: str) -> None:
-        self.ecritures.append(f"clore {identifiant}")
+        self.ecritures.append(("clore", identifiant))
 
     def poser_ref_autre(self, identifiant: str, ref_autre: str | None) -> None:
         if getattr(self.reel, "embarque_ref", True):
-            self.ecritures.append(f"embarquer {ref_autre} dans {identifiant}")
+            self.ecritures.append(("embarquer", f"{ref_autre} dans {identifiant}"))
 
     def verrou(self, identifiant: str) -> str | None:
         return None if identifiant in self.crees else self.reel.verrou(identifiant)

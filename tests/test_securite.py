@@ -59,6 +59,9 @@ def test_secret_en_double_ou_fichier_illisible_refuse(tmp_path: Path) -> None:
         ("SEUIL_POURCENT", "150", "entre 1 et 100"),
         ("FUSEAU", "Mars/Olympus", "fuseau"),
         ("ALERTE_WEBHOOK_URL", "file:///etc/passwd", "http"),
+        ("DOLIBARR_ATTRIBUT", "id:=:1) or (1", "attribut"),
+        ("LECTURES_PARALLELES", "0", "entre 1 et 16"),
+        ("TAILLE_PAGE_OPENPROJECT", "5000", "entre 10 et 1000"),
     ],
 )
 def test_configuration_dangereuse_ou_fausse_refusee_au_demarrage(variable: str, valeur: str, motif: str) -> None:

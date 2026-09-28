@@ -1,19 +1,20 @@
 """Ligne de commande.
 
 dolop verifier                         chaque prérequis de la mise en route (lecture seule)
-dolop simuler                          ce qui serait fait, sans rien écrire (par défaut)
+dolop simuler [--export fichier.csv]   ce qui serait fait, sans rien écrire (par défaut)
 dolop une-fois [--confirmer-suppressions]  un cycle réel
 dolop service                          un cycle toutes les INTERVALLE_SECONDES
 dolop rapport                          liens, derniers cycles, alertes en cours
 dolop annuler <cycle> [--oui]          supprimer ce qu'un cycle a créé (montre d'abord)
 dolop sauvegarder [fichier]            copie cohérente de la base d'état, même pendant un cycle
-dolop sante                            code 0 si un cycle a réussi il y a moins de 15 min
+dolop sante                            code 0 si un cycle a réussi, ou avance, depuis moins de 15 min
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import csv
 import json
 import logging
 import os
@@ -21,6 +22,8 @@ import signal
 import sqlite3
 import sys
 import threading
+from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -45,6 +48,8 @@ log = logging.getLogger("dolop")
 
 # Un cycle lancé à la main attend au plus ce temps que celui du service se termine.
 ATTENTE_CYCLE = 300.0
+# Au-delà, la simulation n'affiche que le résumé et les premières lignes (tout est dans l'export).
+LIGNES_SIMULATION = 40
 
 
 def construire(config: Config) -> Contexte:
@@ -55,12 +60,16 @@ def construire(config: Config) -> Contexte:
         d.nouveau_cycle()
         o.nouveau_cycle()
 
+    def brancher_pouls(pouls: Callable[[], None] | None) -> None:
+        d.http.pouls = o.http.pouls = pouls
+
     return Contexte(
         adaptateurs={"dol": adaptateurs_dol(d), "op": adaptateurs_op(o)},
         convertisseurs={("projet", "client"): d.convertir_client},
         commentaires_op=o,
         notes_dol=d,
         avant_cycle=avant_cycle,
+        brancher_pouls=brancher_pouls,
         seuil_suppressions=config.seuil_suppressions,
         seuil_pourcent=config.seuil_pourcent,
         fuseau=config.fuseau,
@@ -78,17 +87,36 @@ def afficher(resultat: Resultat) -> None:
         print(f"  ✗ {erreur}")
 
 
-def cmd_simuler(config: Config, etat: Etat) -> int:
+def cmd_simuler(config: Config, etat: Etat, export: str | None = None) -> int:
     print("SIMULATION — rien n'est écrit, ni dans Dolibarr, ni dans OpenProject, ni dans la base d'état.\n")
-    r = executer_cycle(construire(config), etat, Alertes(etat, None), mode="simuler", echo=print)
-    if r.ecritures:
-        print("\nÉcritures qui seraient faites :")
-        for ligne in r.ecritures:
-            print(f"  {ligne}")
-    elif r.statut == "réussi":
-        print("\nAucune écriture : les deux outils sont d'accord.")
+    # Sur un outil rempli, le détail de chaque objet noierait le résumé : il va dans l'export.
+    echo = print if export is None else None
+    r = executer_cycle(construire(config), etat, Alertes(etat, None), mode="simuler", echo=echo)
+    afficher_plan(r, export)
     afficher(r)
     return 0 if r.statut == "réussi" else 1
+
+
+def afficher_plan(r: Resultat, export: str | None) -> None:
+    if export is not None:
+        with open(export, "w", encoding="utf-8", newline="") as f:
+            ecrivain = csv.writer(f, delimiter=";")
+            ecrivain.writerow(["outil", "type", "action", "detail"])
+            ecrivain.writerows([e.outil, e.type, e.action, e.detail] for e in r.plan)
+        print(f"\nDétail des {len(r.plan)} écritures prévues : {export}")
+    if not r.plan:
+        if r.statut == "réussi":
+            print("\nAucune écriture : les deux outils sont d'accord.")
+        return
+    print("\nÉcritures qui seraient faites, par outil, type et action :")
+    for (outil, type_, action), n in sorted(Counter((e.outil, e.type, e.action) for e in r.plan).items()):
+        print(f"  {outil:<11} {type_:<12} {action:<10} {n:>7}")
+    print()
+    for ligne in r.ecritures[:LIGNES_SIMULATION]:
+        print(f"  {ligne}")
+    reste = len(r.plan) - LIGNES_SIMULATION
+    if reste > 0:
+        print(f"  … et {reste} autres : « dolop simuler --export fichier.csv » pour la liste complète")
 
 
 def _alertes(config: Config, etat: Etat) -> Alertes:
@@ -249,15 +277,25 @@ def cmd_verifier(config: Config) -> int:
 
 
 def cmd_sante(config: Config) -> int:
+    """Vert si un cycle a réussi récemment, ou si un cycle long avance encore (premier chargement
+    d'un outil rempli) après un cycle réussi ou au démarrage. Rouge si les cycles échouent."""
     try:
         with Etat.lire_seulement(config.base) as etat:
             dernier = etat.meta("dernier_succes")
+            en_cours = etat.meta("cycle_en_cours")
+            precedent = etat.statut_dernier_cycle_termine()
     except (BaseIllisible, OSError, sqlite3.Error) as e:
         print(f"base d'état illisible : {e}")
         return 1
-    if dernier and age(datetime.fromisoformat(dernier)) < timedelta(minutes=15):
+    limite = timedelta(minutes=config.sante_minutes)
+    if dernier and age(datetime.fromisoformat(dernier)) < limite:
         return 0
-    print(f"aucun cycle réussi depuis 15 min (dernier : {dernier or 'jamais'})")
+    if en_cours and precedent in (None, "réussi"):
+        info = json.loads(en_cours)
+        if age(datetime.fromisoformat(info["battement"])) < limite:
+            print(f"cycle {info['cycle']} en cours depuis {info['debut']}, dernier signe de vie {info['battement']}")
+            return 0
+    print(f"aucun cycle réussi depuis {config.sante_minutes} min (dernier : {dernier or 'jamais'})")
     return 1
 
 
@@ -273,7 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     sous = parser.add_subparsers(dest="commande")
     sous.add_parser("verifier")
-    sous.add_parser("simuler")
+    sim = sous.add_parser("simuler")
+    sim.add_argument("--export", metavar="FICHIER", help="liste complète des écritures prévues, en CSV")
     une = sous.add_parser("une-fois")
     une.add_argument("--confirmer-suppressions", action="store_true")
     sous.add_parser("service")
@@ -326,7 +365,7 @@ def _executer(commande: str, args: argparse.Namespace, config: Config) -> int:
         raise
     with etat:
         if commande == "simuler":
-            return cmd_simuler(config, etat)
+            return cmd_simuler(config, etat, getattr(args, "export", None))
         if commande == "une-fois":
             return cmd_une_fois(config, etat, args.confirmer_suppressions)
         if commande == "service":

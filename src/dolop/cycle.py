@@ -10,8 +10,13 @@ Déroulé :
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import json
 import logging
+import sqlite3
+import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -55,9 +60,24 @@ class Contexte:
     commentaires_op: SourceCommentaires | None = None
     notes_dol: CibleNotes | None = None
     avant_cycle: Callable[[], None] = lambda: None
+    # Reçoit la fonction « signe de vie » à appeler à chaque réponse HTTP (None en fin de cycle).
+    brancher_pouls: Callable[[Callable[[], None] | None], None] = lambda _pouls: None
     seuil_suppressions: int = 5
     seuil_pourcent: int = 20
     fuseau: ZoneInfo = field(default_factory=lambda: ZoneInfo("Europe/Paris"))
+
+
+@dataclass(frozen=True)
+class Ecriture:
+    """Une écriture qu'un cycle simulé aurait faite."""
+
+    outil: str
+    type: str
+    action: str
+    detail: str
+
+    def __str__(self) -> str:
+        return f"{self.outil:<11} {self.type:<11} {self.action} {self.detail}"
 
 
 @dataclass
@@ -66,7 +86,11 @@ class Resultat:
     statut: str  # « réussi », « bloqué » (disjoncteur) ou « échec »
     bilan: Bilan
     message: str = ""
-    ecritures: list[str] = field(default_factory=list)
+    plan: list[Ecriture] = field(default_factory=list)
+
+    @property
+    def ecritures(self) -> list[str]:
+        return [str(e) for e in self.plan]
 
 
 class Disjoncteur(Exception):
@@ -77,10 +101,33 @@ class _NotesSimulees:
     """En simulation, la copie des commentaires est seulement notée."""
 
     def __init__(self) -> None:
-        self.ecritures: list[str] = []
+        self.ecritures: list[Ecriture] = []
 
     def ecrire_bloc(self, identifiant: str, bloc_html: str) -> None:
-        self.ecritures.append(f"{'Dolibarr':<11} {'commentaires':<11} copier dans la note de la tâche {identifiant}")
+        self.ecritures.append(Ecriture("Dolibarr", "commentaires", "copier", f"dans la note de la tâche {identifiant}"))
+
+
+class _Pouls:
+    """Signe de vie d'un cycle en cours, pour que « dolop sante » distingue un long cycle qui avance
+    (premier chargement d'un outil rempli) d'un service bloqué. Écrit au plus toutes les 30 s, et
+    seulement depuis le fil du cycle : la base d'état ne se partage pas entre fils."""
+
+    INTERVALLE = 30.0
+
+    def __init__(self, etat: Etat, cycle: int) -> None:
+        self.etat = etat
+        self.fil = threading.get_ident()
+        self.info = {"cycle": cycle, "debut": maintenant().isoformat(timespec="seconds")}
+        self.dernier = float("-inf")
+        self()
+
+    def __call__(self) -> None:
+        if threading.get_ident() != self.fil or time.monotonic() - self.dernier < self.INTERVALLE:
+            return
+        self.dernier = time.monotonic()
+        info = {**self.info, "battement": maintenant().isoformat(timespec="seconds")}
+        with contextlib.suppress(sqlite3.Error):  # un signe de vie manqué ne doit pas faire échouer le cycle
+            self.etat.poser_meta("cycle_en_cours", json.dumps(info))
 
 
 def executer_cycle(
@@ -112,9 +159,11 @@ def executer_cycle(
     cycle = etat.debuter_cycle(mode)
     bilan = Bilan()
     statut, message = "réussi", ""
+    pouls: Callable[[], None] = _Pouls(etat, cycle) if ecrire else (lambda: None)
+    ctx.brancher_pouls(pouls)
     try:
         ctx.avant_cycle()
-        _Cycle(ctx, adaptateurs, notes, etat, alertes, cycle, bilan, echo, confirmer_suppressions).derouler()
+        _Cycle(ctx, adaptateurs, notes, etat, alertes, cycle, bilan, echo, confirmer_suppressions, pouls).derouler()
     except Disjoncteur as e:
         statut, message = "bloqué", str(e)
         alertes.lever("disjoncteur", message, permanente=True)
@@ -124,7 +173,10 @@ def executer_cycle(
     except Exception as e:  # défaut inattendu : on garde la trace complète
         statut, message = "échec", f"{type(e).__name__} : {e}"
         log.exception("cycle %s en échec", cycle)
+    ctx.brancher_pouls(None)
     etat.terminer_cycle(cycle, statut, {**bilan.resume(), "message": message})
+    if ecrire:
+        etat.effacer_meta("cycle_en_cours")
 
     if statut == "réussi":
         alertes.retablir("disjoncteur", "Le disjoncteur est refermé : la synchronisation a repris.")
@@ -139,11 +191,11 @@ def executer_cycle(
         elif statut == "réussi":
             alertes.retablir("echec", "La synchronisation fonctionne à nouveau.")
 
-    ecritures = [f"{NOM_COTE[s.cote]:<11} {s.type:<11} {e}" for s in simulateurs for e in s.ecritures]
-    ecritures += notes_simulees.ecritures
+    plan = [Ecriture(NOM_COTE[s.cote], s.type, action, detail) for s in simulateurs for action, detail in s.ecritures]
+    plan += notes_simulees.ecritures
     if not ecrire:
         etat.fermer()  # la copie de simulation
-    return Resultat(cycle, statut, bilan, message, ecritures)
+    return Resultat(cycle, statut, bilan, message, plan)
 
 
 class _Cycle:
@@ -158,8 +210,10 @@ class _Cycle:
         bilan: Bilan,
         echo: Echo | None,
         confirmer_suppressions: bool,
+        pouls: Callable[[], None] = lambda: None,
     ):
         self.ctx = ctx
+        self.pouls = pouls
         self.notes = notes
         self.a = adaptateurs
         self.etat = etat
@@ -193,6 +247,7 @@ class _Cycle:
                         "Droits du compte technique ou panne de l'API ? Rien n'a été écrit."
                     )
             self.lus[r.type] = lus
+            self.pouls()
             self.absents[r.type] = self.confirmer_absences(r, lus, actifs)
             if r is PROJET:
                 self.geles = self.calculer_geles(liens, lus)
@@ -292,7 +347,7 @@ class _Cycle:
         self.synchroniser_commentaires()
 
     def executeur(self, r: Regles, traducteur: Traducteur) -> _ExecuteurCumule:
-        return _ExecuteurCumule(
+        executeur = _ExecuteurCumule(
             self.bilan,
             r,
             self.adaptateurs_de(r.type),
@@ -302,6 +357,8 @@ class _Cycle:
             self.cycle,
             self.echo,
         )
+        executeur.pouls = self.pouls
+        return executeur
 
     def synchroniser_commentaires(self) -> None:
         source, cible = self.ctx.commentaires_op, self.notes

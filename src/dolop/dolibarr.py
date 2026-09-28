@@ -6,12 +6,17 @@ Faits vérifiés dans le code de l'API installée (24.0.0) :
 - ``addtimespent`` ne renvoie pas l'identifiant créé et n'accepte pas ``ref_ext`` ;
 - ``/projects/alltimespent`` liste tous les temps en une requête paginée, sans ``invoice_id`` :
   la facturation se vérifie au cas par cas avec ``getTimeSpent`` ;
-- le statut d'un utilisateur se change par ``PUT /users/{id}`` avec ``status``.
+- le statut d'un utilisateur se change par ``PUT /users/{id}`` avec ``status`` ;
+- ``sqlfilters`` accepte les attributs supplémentaires des tâches (alias ``ef``).
+
+Volumes : les listes sont lues page par page et converties au fil de l'eau, sans garder les pages ;
+ce qui ne se lit qu'objet par objet (contacts, fiches des tiers) est lu en parallèle.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import replace
 from datetime import time
 from typing import Any
 
@@ -34,6 +39,7 @@ from .conversions import (
 from .cycle import remplacer_bloc
 from .http import ClientHttp, Introuvable
 from .modele import Enreg, Intraduisible
+from .parallele import en_parallele
 
 HORS_TACHE = "-"  # valeur de l'attribut qui marque la tâche « Temps hors tâche »
 ROLES_PROJET = {"PROJECTLEADER": "chef", "PROJECTCONTRIBUTOR": "contributeur"}
@@ -60,6 +66,10 @@ def _id(v: Any) -> str | None:
     return str(n) if n else None
 
 
+def _fiche(t: Mapping[str, Any]) -> dict[str, str]:
+    return {"nom": _txt(t.get("name") or t.get("nom")), "code": _txt(t.get("code_client"))}
+
+
 class Dolibarr:
     """Client Dolibarr et mémoire de cycle partagée par les adaptateurs."""
 
@@ -72,36 +82,52 @@ class Dolibarr:
             config.dolibarr_url.rstrip("/") + "/api/index.php",
             entetes={"DOLAPIKEY": config.dolibarr_cle},
             transport=transport,
+            delai=config.delai_http,
         )
+        # Tiers gardés d'un cycle à l'autre (des milliers dans un Dolibarr rempli) : fiches lues une à
+        # une pour les seuls clients des projets, liste complète pour retrouver un client tapé dans
+        # OpenProject. Oubliés à chaque lecture complète, pour suivre les renommages.
+        self._fiches_tiers: dict[str, dict[str, str] | None] = {}
+        self._tiers: dict[str, dict[str, str]] | None = None
         self.nouveau_cycle()
 
-    def nouveau_cycle(self) -> None:
-        self._tiers: dict[str, dict[str, str]] | None = None
+    def nouveau_cycle(self, complet: bool = True) -> None:
         self._utilisateurs: list[dict[str, Any]] | None = None
         self._projets: list[dict[str, Any]] | None = None
-        self._taches: list[dict[str, Any]] | None = None
+        self._hors_tache: dict[str, str] | None = None
+        self._tiers_relus = False
+        if complet:
+            self._fiches_tiers = {}
+            self._tiers = None
 
     # ------------------------------------------------------------------------ lectures
 
-    def pages(self, chemin: str, **params: Any) -> list[dict[str, Any]]:
-        resultat: list[dict[str, Any]] = []
-        for page in range(10_000):
+    def iter_pages(self, chemin: str, **params: Any) -> Iterator[dict[str, Any]]:
+        """Les objets d'une liste, page par page : aucune page n'est gardée une fois lue."""
+        taille = self.config.taille_page_dolibarr
+        for page in range(100_000):
             try:
-                lot = self.http.get(chemin, limit=100, page=page, **params)
+                lot = self.http.get(chemin, limit=taille, page=page, **params)
             except Introuvable:
                 # Certaines versions répondent 404 à une page vide. Sur la première page, ce serait
                 # une adresse fausse : on laisse l'erreur remonter plutôt que de croire la liste vide.
                 if page == 0:
                     raise
-                return resultat
+                return
             if isinstance(lot, dict):
                 lot = lot.get("data", [])
             if not isinstance(lot, list):
                 raise ErreurApi(f"Dolibarr GET {chemin} : liste attendue, reçu {type(lot).__name__}")
-            resultat.extend(lot)
-            if len(lot) < 100:
-                return resultat
+            yield from lot
+            if len(lot) < taille:
+                return
         raise ErreurApi(f"Dolibarr GET {chemin} : pagination sans fin")
+
+    def pages(self, chemin: str, **params: Any) -> list[dict[str, Any]]:
+        return list(self.iter_pages(chemin, **params))
+
+    def en_parallele(self, lecture: Callable[[str], Any], identifiants: Iterable[str]) -> list[Any]:
+        return en_parallele(lecture, identifiants, self.config.lectures_paralleles)
 
     def utilisateurs(self) -> list[dict[str, Any]]:
         if self._utilisateurs is None:
@@ -119,43 +145,66 @@ class Dolibarr:
             self._projets = self.pages("/projects", sortfield="t.rowid")
         return self._projets
 
-    def taches(self) -> list[dict[str, Any]]:
-        if self._taches is None:
-            self._taches = self.pages("/tasks", sortfield="t.rowid")
-        return self._taches
-
     def projets_clos(self) -> set[str]:
         return {str(p["id"]) for p in self.projets() if _int(p.get("status", p.get("statut"))) == CLOS}
 
     def taches_hors_tache(self) -> dict[str, str]:
-        """Tâche « Temps hors tâche » → son projet."""
-        return {
-            str(t["id"]): str(_int(t.get("fk_project")))
-            for t in self.taches()
-            if _txt((t.get("array_options") or {}).get(self.attribut)) == HORS_TACHE
-        }
+        """Tâche « Temps hors tâche » → son projet. Une requête filtrée par cycle, gardée en mémoire :
+        chaque tâche et chaque temps lus la consultent (la recalculer à chaque fois coûtait au carré)."""
+        if self._hors_tache is None:
+            filtre = f"(ef.{self.config.dolibarr_attribut}:=:'{HORS_TACHE}')"
+            taches: Iterable[dict[str, Any]]
+            try:
+                taches = self.pages("/tasks", sortfield="t.rowid", sqlfilters=filtre)
+            except ErreurApi as e:
+                if e.statut != 400:
+                    raise
+                taches = self.iter_pages("/tasks", sortfield="t.rowid")  # filtre refusé : on parcourt tout
+            self._hors_tache = {
+                str(t["id"]): str(_int(t.get("fk_project")))
+                for t in taches
+                if _txt((t.get("array_options") or {}).get(self.attribut)) == HORS_TACHE
+            }
+        return self._hors_tache
 
     # --------------------------------------------------------------------------- tiers
 
-    def tiers(self) -> dict[str, dict[str, str]]:
-        if self._tiers is None:
-            self._tiers = {
-                str(t["id"]): {"nom": _txt(t.get("name") or t.get("nom")), "code": _txt(t.get("code_client"))}
-                for t in self.pages("/thirdparties", sortfield="t.rowid")
-            }
+    def tiers(self, relire: bool = False) -> dict[str, dict[str, str]]:
+        """Tous les tiers. ``relire`` : une seule relecture par cycle, quand un nom reste introuvable."""
+        if self._tiers is None or (relire and not self._tiers_relus):
+            self._tiers = {str(t["id"]): _fiche(t) for t in self.iter_pages("/thirdparties", sortfield="t.rowid")}
+            self._tiers_relus = True
         return self._tiers
+
+    def _fiche_tiers(self, ident: str) -> dict[str, str] | None:
+        t = _lire(lambda: self.http.get(f"/thirdparties/{ident}"))
+        return None if t is None else _fiche(t)
+
+    def precharger_tiers(self, socids: Iterable[Any]) -> None:
+        """Fiches des tiers cités, lues en parallèle, sauf celles déjà en mémoire."""
+        manquants = sorted({i for i in (_id(s) for s in socids) if i and i not in self._fiches_tiers})
+        self._fiches_tiers.update(zip(manquants, self.en_parallele(self._fiche_tiers, manquants), strict=True))
 
     def nom_tiers(self, socid: Any) -> str | None:
         ident = _id(socid)
         if ident is None:
             return None
-        tiers = self.tiers().get(ident)
-        return tiers["nom"] if tiers else None
+        if ident not in self._fiches_tiers:
+            self.precharger_tiers([ident])
+        fiche = self._fiches_tiers[ident]
+        return fiche["nom"] if fiche else None
 
     def resoudre_client(self, texte: str) -> str:
         """Texte tapé dans OpenProject → nom exact du tiers Dolibarr."""
         cle = cle_nom(texte)
-        trouves = {t["nom"] for t in self.tiers().values() if cle in (cle_nom(t["nom"]), cle_nom(t["code"]))}
+
+        def chercher(relire: bool) -> set[str]:
+            tous = self.tiers(relire).values()
+            return {t["nom"] for t in tous if cle in (cle_nom(t["nom"]), cle_nom(t["code"]))}
+
+        trouves = chercher(relire=False)
+        if len(trouves) != 1:
+            trouves = chercher(relire=True)  # tiers créé depuis la dernière lecture ?
         if len(trouves) == 1:
             return trouves.pop()
         if not trouves:
@@ -167,12 +216,14 @@ class Dolibarr:
     def id_tiers(self, nom: str | None) -> int:
         if not nom:
             return 0
-        ids = [i for i, t in self.tiers().items() if t["nom"] == nom]
-        if len(ids) != 1:
-            ids = [i for i, t in self.tiers().items() if cle_nom(t["nom"]) == cle_nom(nom)]
-        if len(ids) != 1:
-            raise Intraduisible(f"tiers « {nom} » introuvable ou ambigu dans Dolibarr")
-        return int(ids[0])
+        for relire in (False, True):
+            tous = self.tiers(relire)
+            ids = [i for i, t in tous.items() if t["nom"] == nom]
+            if len(ids) != 1:
+                ids = [i for i, t in tous.items() if cle_nom(t["nom"]) == cle_nom(nom)]
+            if len(ids) == 1:
+                return int(ids[0])
+        raise Intraduisible(f"tiers « {nom} » introuvable ou ambigu dans Dolibarr")
 
     def convertir_client(self, valeur: Any, de: str) -> Any:
         if de == "dol" or not valeur:
@@ -298,7 +349,9 @@ class Projets(_Base):
         )
 
     def lister(self) -> dict[str, Enreg]:
-        return {str(p["id"]): self._enreg(p) for p in self.d.projets()}
+        projets = self.d.projets()
+        self.d.precharger_tiers(p.get("socid") for p in projets)
+        return {str(p["id"]): self._enreg(p) for p in projets}
 
     def lire(self, identifiant: str) -> Enreg | None:
         p = _lire(lambda: self.d.http.get(f"/projects/{identifiant}"))
@@ -379,12 +432,11 @@ class Membres(_Base):
 
     def lister(self) -> dict[str, Enreg]:
         exclus, clos = self.d.exclus(), self.d.projets_clos()
+        # Projet gelé (clos) : on ne lit pas ses membres. Les autres : une requête chacun, en parallèle.
+        projets = [str(p["id"]) for p in self.d.projets() if str(p["id"]) not in clos]
         resultat: dict[str, Enreg] = {}
-        for p in self.d.projets():
-            projet = str(p["id"])
-            if projet in clos:
-                continue  # projet gelé : on ne lit pas ses membres
-            for utilisateur, role in self._contacts(projet).items():
+        for projet, contacts in zip(projets, self.d.en_parallele(self._contacts, projets), strict=True):
+            for utilisateur, role in contacts.items():
                 if utilisateur not in exclus:
                     e = self._enreg(projet, utilisateur, role)
                     resultat[e.id] = e
@@ -472,11 +524,18 @@ class Taches(_Base):
         )
 
     def lister(self) -> dict[str, Enreg]:
+        return self._lister(self.d.iter_pages("/tasks", sortfield="t.rowid"))
+
+    def _lister(self, taches: Iterable[Mapping[str, Any]]) -> dict[str, Enreg]:
         hors, clos = self.d.taches_hors_tache(), self.d.projets_clos()
+        # Converties au fil de la lecture ; l'assigné, qui demande une requête par tâche, est lu
+        # ensuite en parallèle, et seulement hors des projets clos (gelés).
+        partiels = [self._enreg(t, avec_assigne=False) for t in taches if str(t["id"]) not in hors]
+        a_lire = [e.id for e in partiels if e.champs["projet"] not in clos]
+        assignes = dict(zip(a_lire, self.d.en_parallele(self._assigne, a_lire), strict=True))
         return {
-            str(t["id"]): self._enreg(t, avec_assigne=str(_int(t.get("fk_project"))) not in clos)
-            for t in self.d.taches()
-            if str(t["id"]) not in hors
+            e.id: replace(e, champs={**e.champs, "assigne": assignes[e.id]}) if e.id in assignes else e
+            for e in partiels
         }
 
     def lire(self, identifiant: str) -> Enreg | None:
@@ -562,7 +621,7 @@ class Taches(_Base):
             "array_options": {self.d.attribut: HORS_TACHE},
         }
         identifiant = str(self.d.http.post("/tasks", corps))
-        self.d._taches = None
+        self.d.taches_hors_tache()[identifiant] = projet
         return identifiant
 
 
@@ -576,11 +635,11 @@ class Temps(_Base):
         super().__init__(d)
         self.taches = taches
 
-    def _enreg(self, row: Mapping[str, Any]) -> Enreg:
+    def _enreg(self, row: Mapping[str, Any], *, date_manquante_permise: bool = False) -> Enreg:
         tache = str(_int(row.get("task_id")))
         date = texte_local_vers_date(row.get("element_datehour"))
-        if date is None:
-            date = self._date_sans_heure(tache, str(row["rowid"]))
+        if date is None and not date_manquante_permise:
+            date = self._dates_sans_heure(tache).get(str(row["rowid"]))
         return Enreg(
             id=str(row["rowid"]),
             champs={
@@ -594,19 +653,38 @@ class Temps(_Base):
             libelle=f"{_txt(row.get('task_label'))} {date} ({_txt(row.get('user_login'))})",
         )
 
-    def _date_sans_heure(self, tache: str, identifiant: str) -> str | None:
-        """Anciens temps saisis sans heure : la date n'est donnée que par la tâche."""
-        for ligne in self.d.http.get(f"/tasks/{tache}/timespent") or []:
-            if str(ligne.get("timespent_line_id")) == identifiant:
-                return horodatage_vers_date(ligne.get("timespent_line_date"), self.d.fuseau)
-        return None
+    def _dates_sans_heure(self, tache: str) -> dict[str, str | None]:
+        """Anciens temps saisis sans heure : leur date n'est donnée que par la liste des temps de la tâche."""
+        return {
+            str(ligne.get("timespent_line_id")): horodatage_vers_date(ligne.get("timespent_line_date"), self.d.fuseau)
+            for ligne in self.d.http.get(f"/tasks/{tache}/timespent") or []
+        }
 
     def _lignes(self, **params: Any) -> list[dict[str, Any]]:
         return self.d.pages("/projects/alltimespent", sortfield="et.rowid", **params)
 
     def lister(self) -> dict[str, Enreg]:
+        return self._lister(self.d.iter_pages("/projects/alltimespent", sortfield="et.rowid"))
+
+    def _lister(self, lignes: Iterable[Mapping[str, Any]]) -> dict[str, Enreg]:
         exclus = self.d.exclus()
-        return {str(r["rowid"]): self._enreg(r) for r in self._lignes() if str(_int(r.get("fk_user"))) not in exclus}
+        resultat: dict[str, Enreg] = {}
+        sans_date: dict[str, list[str]] = {}  # tâche → ses temps anciens saisis sans heure
+        for r in lignes:
+            if str(_int(r.get("fk_user"))) in exclus:
+                continue
+            e = self._enreg(r, date_manquante_permise=True)
+            resultat[e.id] = e
+            if e.champs["date"] is None:
+                sans_date.setdefault(str(_int(r.get("task_id"))), []).append(e.id)
+        # Leur date ne se lit que dans la liste des temps de la tâche : une requête par tâche, pas par temps.
+        taches = list(sans_date)
+        for dates in self.d.en_parallele(self._dates_sans_heure, taches):
+            for identifiant, date in dates.items():
+                lu = resultat.get(identifiant)
+                if lu is not None and lu.champs["date"] is None:
+                    resultat[identifiant] = replace(lu, champs={**lu.champs, "date": date})
+        return resultat
 
     def _ligne(self, identifiant: str) -> dict[str, Any] | None:
         lignes = self._lignes(sqlfilters=f"(et.rowid:=:{int(identifiant)})")

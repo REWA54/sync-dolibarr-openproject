@@ -42,9 +42,17 @@ forgejo-runner register --no-interactive --instance https://forge.example.org \
   --token <jeton> --name runner-ci --labels debian-13:host
 ```
 
-Le job de publication se connecte au registre avec le jeton automatique du job
-(`secrets.GITHUB_TOKEN`), dans un dossier de configuration Docker jetable : aucun identifiant ne
-reste sur le runner.
+Le jeton automatique d'un job ne peut pas écrire dans le registre de Forgejo (réponse 401). La
+publication utilise donc un jeton du propriétaire du dépôt, limité à **package : lecture et
+écriture**, rangé dans le secret `REGISTRE_JETON` du dépôt :
+
+1. Forgejo → avatar → *Paramètres* → *Applications* → *Générer un nouveau jeton*, avec la seule
+   permission *package* en lecture et écriture ;
+2. dépôt → *Paramètres* → *Actions* → *Secrets* → *Ajouter un secret* `REGISTRE_JETON`.
+
+Sans ce secret, le job « Image » échoue au moment de publier, après toutes les vérifications. Le job
+se connecte au registre dans un dossier de configuration Docker jetable : aucun identifiant ne reste
+sur le runner.
 
 ## Déployer depuis le registre de la forge
 
