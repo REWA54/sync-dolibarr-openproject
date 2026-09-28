@@ -248,7 +248,9 @@ jobs:
             docker push -q "${image}:${etiquette}"
           done
           echo "Image publiée : ${image}:{$(IFS=,; echo "${etiquettes[*]}")}"
-          echo "Empreinte    : $(docker inspect --format '{{index .RepoDigests 0}}' "${image}:${etiquettes[0]}")"
+          # L'empreinte sous le nom du registre : c'est elle qui s'écrit dans DOLOP_IMAGE (…:sha-xxxxxxx@sha256:…).
+          docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${image}:${etiquettes[0]}" \
+            | { grep -F "${image}@" || true; } | sed 's/^/Empreinte    : /'
       - name: Ménage
         if: always()
         run: docker image rm -f "$LOCALE" >/dev/null 2>&1 || true
