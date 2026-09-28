@@ -1,0 +1,4 @@
+# Label du runner auto-hébergé de Forgejo (.forgejo/workflows), inconnu d'actionlint.
+self-hosted-runner:
+  labels:
+    - debian-13

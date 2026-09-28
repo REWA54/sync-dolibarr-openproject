@@ -1,0 +1,288 @@
+# Intégration et livraison continues sur Forgejo, avec un runner auto-hébergé : rien ne passe par GitHub.
+#
+#   tests ─┐
+#   sécurité du code ─┤
+#   secrets ─┼─► image : construite, scannée, testée durcie ─► publiée dans le registre de la forge ─► version
+#   fichiers de config ─┘
+#
+# Même chaîne que .github/workflows/ci.yml, qui continue de tourner sur le miroir GitHub pour l'image
+# publique. Ici : aucune action `uses:`, des outils tirés de PyPI et de Docker Hub, figés par empreinte,
+# et l'image publiée dans le registre de conteneurs de Forgejo lui-même. Les jobs tournent directement
+# sur la machine du runner (label `debian-13`, mode hôte), où sont installés Docker, uv et les Python
+# de la matrice. Voir docs/forgejo.md.
+#
+# Rien n'est publié tant qu'une seule vérification échoue. Les demandes de fusion et le passage
+# hebdomadaire vérifient tout sans rien publier.
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+    tags: ["v*.*.*"]
+  pull_request:
+  schedule:
+    # Chaque lundi : de nouvelles failles sont publiées même quand le code ne bouge pas.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TRIVY_IMAGE: aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+  GITLEAKS_IMAGE: zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+  HADOLINT_IMAGE: hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
+  ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+  SHELLCHECK_IMAGE: koalaman/shellcheck:stable@sha256:bb596a0d169b85ddd81d8b6d3a2ff6d5baf5fca10b97f575ebc647c3dff62b3d
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: debian-13
+    permissions:
+      contents: read # lire le code
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      # Pas d'actions/checkout : le mode hôte n'a pas Node, et git suffit. Le jeton du job n'est
+      # jamais écrit sur le disque (option -c de git).
+      - name: Code
+        env:
+          JETON: ${{ secrets.GITHUB_TOKEN }}
+          SERVEUR: ${{ github.server_url }}
+          DEPOT: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          git init -q .
+          git -c "http.extraHeader=Authorization: Basic $(printf 'ci:%s' "$JETON" | base64 -w0)" \
+            fetch -q --no-tags --depth=1 "$SERVEUR/$DEPOT.git" "$COMMIT"
+          git checkout -q --force --detach FETCH_HEAD
+      - name: Dépendances figées, vérifiées par empreinte
+        env:
+          PYTHON: ${{ matrix.python }}
+        run: |
+          uv venv --python "$PYTHON"
+          uv pip install --require-hashes -r requirements-dev.txt -r requirements-build.txt
+          uv pip install --no-deps --no-build-isolation -e .
+      - name: Lint et format
+        run: |
+          .venv/bin/ruff check src tests
+          .venv/bin/ruff format --check src tests
+      - name: Typage strict
+        run: .venv/bin/mypy
+      - name: Tests et couverture
+        run: .venv/bin/pytest --cov --cov-report=term
+
+  securite-code:
+    name: Sécurité du code et des dépendances
+    runs-on: debian-13
+    permissions:
+      contents: read # lire le code
+    steps:
+      - name: Code
+        env:
+          JETON: ${{ secrets.GITHUB_TOKEN }}
+          SERVEUR: ${{ github.server_url }}
+          DEPOT: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          git init -q .
+          git -c "http.extraHeader=Authorization: Basic $(printf 'ci:%s' "$JETON" | base64 -w0)" \
+            fetch -q --no-tags --depth=1 "$SERVEUR/$DEPOT.git" "$COMMIT"
+          git checkout -q --force --detach FETCH_HEAD
+      - name: Outils
+        run: |
+          uv venv --python 3.13
+          uv pip install --require-hashes -r requirements-dev.txt
+      - name: Analyse statique (bandit)
+        run: .venv/bin/bandit -c pyproject.toml -r src
+      - name: Failles connues des dépendances (pip-audit)
+        run: |
+          for fichier in requirements.txt requirements-build.txt requirements-dev.txt; do
+            echo "── $fichier"
+            .venv/bin/pip-audit --strict --require-hashes --disable-pip --progress-spinner off -r "$fichier"
+          done
+
+  secrets:
+    name: Recherche de secrets dans tout l'historique
+    runs-on: debian-13
+    permissions:
+      contents: read # lire le code
+    steps:
+      - name: Code, avec tout l'historique
+        env:
+          JETON: ${{ secrets.GITHUB_TOKEN }}
+          SERVEUR: ${{ github.server_url }}
+          DEPOT: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          git init -q .
+          git -c "http.extraHeader=Authorization: Basic $(printf 'ci:%s' "$JETON" | base64 -w0)" \
+            fetch -q --no-tags "$SERVEUR/$DEPOT.git" "$COMMIT"
+          git checkout -q --force --detach FETCH_HEAD
+      - name: gitleaks
+        run: docker run --rm -v "$PWD:/depot:ro" "$GITLEAKS_IMAGE" git /depot --redact --no-banner --verbose
+
+  fichiers-config:
+    name: Dockerfile, workflows et scripts
+    runs-on: debian-13
+    permissions:
+      contents: read # lire le code
+    steps:
+      - name: Code
+        env:
+          JETON: ${{ secrets.GITHUB_TOKEN }}
+          SERVEUR: ${{ github.server_url }}
+          DEPOT: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          git init -q .
+          git -c "http.extraHeader=Authorization: Basic $(printf 'ci:%s' "$JETON" | base64 -w0)" \
+            fetch -q --no-tags --depth=1 "$SERVEUR/$DEPOT.git" "$COMMIT"
+          git checkout -q --force --detach FETCH_HEAD
+      - name: Python de l'image couvert par les tests des deux forges
+        # Une mise à jour de l'image de base ne doit pas faire tourner le service sur une version de
+        # Python que les tests n'ont jamais vue : l'ajouter d'abord aux deux matrices.
+        run: |
+          version=$(sed -nE 's/^FROM python:([0-9]+\.[0-9]+).*/\1/p' Dockerfile | head -1)
+          for workflow in .forgejo/workflows/ci.yml .github/workflows/ci.yml; do
+            grep -qE "^ +python: \[.*\"${version}\"" "$workflow" \
+              || { echo "l'image part de Python ${version}, absent de la matrice de tests de $workflow"; exit 1; }
+          done
+      - name: Dockerfile (hadolint)
+        run: docker run --rm -i "$HADOLINT_IMAGE" < Dockerfile
+      - name: Workflows (actionlint)
+        run: >
+          docker run --rm -v "$PWD:/repo" --workdir /repo "$ACTIONLINT_IMAGE" -color
+          .github/workflows/ci.yml .github/workflows/codeql.yml .github/workflows/dependances.yml
+          .github/workflows/scorecard.yml .forgejo/workflows/ci.yml
+      - name: Sécurité des workflows (zizmor)
+        run: uvx zizmor@1.30.1 --offline --min-severity low .github/workflows .forgejo/workflows
+      - name: Scripts (shellcheck)
+        run: docker run --rm -v "$PWD:/mnt" "$SHELLCHECK_IMAGE" scripts/test-fumee.sh
+      - name: Exemple de déploiement (docker compose)
+        env:
+          DOLOP_IMAGE: exemple
+          DOLOP_DOLIBARR_API_KEY: exemple
+          DOLOP_OPENPROJECT_API_KEY: exemple
+          DOLOP_DONNEES: /tmp/dolop
+          DOLOP_RESEAU: exemple
+        run: docker compose -f compose.yaml config --quiet
+
+  image:
+    name: Image (construction, scan, test durci, publication)
+    needs: [tests, securite-code, secrets, fichiers-config]
+    runs-on: debian-13
+    permissions:
+      contents: read # lire le code
+      packages: write # publier dans le registre de la forge
+    env:
+      # Publier seulement depuis la branche principale ou une étiquette de version, jamais depuis
+      # une demande de fusion ni le passage hebdomadaire.
+      PUBLIER: >-
+        ${{ github.event_name == 'push' && (github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        || startsWith(github.ref, 'refs/tags/v')) }}
+      LOCALE: dolop:ci-${{ github.run_id }}
+    steps:
+      - name: Code
+        env:
+          JETON: ${{ secrets.GITHUB_TOKEN }}
+          SERVEUR: ${{ github.server_url }}
+          DEPOT: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          git init -q .
+          git -c "http.extraHeader=Authorization: Basic $(printf 'ci:%s' "$JETON" | base64 -w0)" \
+            fetch -q --no-tags --depth=1 "$SERVEUR/$DEPOT.git" "$COMMIT"
+          git checkout -q --force --detach FETCH_HEAD
+      - name: Étiquette de version = version du paquet
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          ETIQUETTE: ${{ github.ref_name }}
+        run: |
+          grep -qx "version = \"${ETIQUETTE#v}\"" pyproject.toml \
+            || { echo "l'étiquette ${ETIQUETTE} ne correspond pas à la version de pyproject.toml"; exit 1; }
+          grep -q "^## \[${ETIQUETTE#v}\]" CHANGELOG.md \
+            || { echo "CHANGELOG.md n'a pas de section [${ETIQUETTE#v}]"; exit 1; }
+      - name: Construire (sans publier)
+        run: docker build --platform linux/amd64 --pull -t "$LOCALE" .
+      - name: Failles de l'image (Trivy) — bloquant si un correctif existe
+        # Base de failles gardée d'un passage à l'autre dans un volume Docker du runner.
+        run: >
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v dolop-trivy-cache:/root/.cache
+          "$TRIVY_IMAGE" image --quiet --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$LOCALE"
+      - name: Test de fumée, conteneur durci
+        run: scripts/test-fumee.sh "$LOCALE"
+      - name: Publier dans le registre de la forge
+        if: env.PUBLIER == 'true'
+        env:
+          JETON: ${{ secrets.GITHUB_TOKEN }}
+          ACTEUR: ${{ github.actor }}
+          SERVEUR: ${{ github.server_url }}
+          PROPRIETAIRE: ${{ github.repository_owner }}
+          COMMIT: ${{ github.sha }}
+          REF: ${{ github.ref }}
+        run: |
+          registre="${SERVEUR#*://}"
+          image="${registre}/${PROPRIETAIRE,,}/sync-dolibarr-openproject"
+          etiquettes=("sha-${COMMIT:0:7}")
+          if [[ "$REF" == refs/tags/v* ]]; then
+            version="${REF#refs/tags/v}"
+            etiquettes+=("$version" "${version%.*}")
+          fi
+          # Identifiants dans un dossier jetable : rien ne reste sur le runner après le job.
+          DOCKER_CONFIG="$(mktemp -d)"
+          export DOCKER_CONFIG
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$JETON" | docker login "$registre" -u "$ACTEUR" --password-stdin
+          for etiquette in "${etiquettes[@]}"; do
+            docker tag "$LOCALE" "${image}:${etiquette}"
+            docker push -q "${image}:${etiquette}"
+          done
+          echo "Image publiée : ${image}:{$(IFS=,; echo "${etiquettes[*]}")}"
+          echo "Empreinte    : $(docker inspect --format '{{index .RepoDigests 0}}' "${image}:${etiquettes[0]}")"
+      - name: Ménage
+        if: always()
+        run: docker image rm -f "$LOCALE" >/dev/null 2>&1 || true
+
+  version:
+    name: Publier la version
+    needs: [image]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: debian-13
+    permissions:
+      contents: write # créer la page de version
+    steps:
+      - name: Code
+        env:
+          JETON: ${{ secrets.GITHUB_TOKEN }}
+          SERVEUR: ${{ github.server_url }}
+          DEPOT: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          git init -q .
+          git -c "http.extraHeader=Authorization: Basic $(printf 'ci:%s' "$JETON" | base64 -w0)" \
+            fetch -q --no-tags --depth=1 "$SERVEUR/$DEPOT.git" "$COMMIT"
+          git checkout -q --force --detach FETCH_HEAD
+      - name: Notes tirées du CHANGELOG, page de version dans la forge
+        env:
+          ETIQUETTE: ${{ github.ref_name }}
+          JETON: ${{ secrets.GITHUB_TOKEN }}
+          SERVEUR: ${{ github.server_url }}
+          DEPOT: ${{ github.repository }}
+        run: |
+          version="${ETIQUETTE#v}"
+          awk -v v="$version" '
+            /^## \[/ { dedans = index($0, "[" v "]") > 0; next }
+            dedans { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md n'a pas de section [$version]"; exit 1; }
+          python3 -c 'import json, os, sys; print(json.dumps({"tag_name": os.environ["ETIQUETTE"], "name": os.environ["ETIQUETTE"], "body": sys.stdin.read()}))' \
+            < notes.md > version.json
+          curl -fsS -X POST -H "Authorization: token $JETON" -H "Content-Type: application/json" \
+            --data @version.json "$SERVEUR/api/v1/repos/$DEPOT/releases" > /dev/null

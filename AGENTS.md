@@ -12,7 +12,8 @@ make securite     # bandit, pip-audit, gitleaks (Docker requis)
 make image        # image amd64 + scripts/test-fumee.sh (Docker requis)
 ```
 
-Sans `make` : les commandes exactes sont dans le `Makefile` et dans `.github/workflows/ci.yml`.
+Sans `make` : les commandes exactes sont dans le `Makefile` et dans `.forgejo/workflows/ci.yml`
+(forge Forgejo, runner auto-hébergé, voir `docs/forgejo.md`) ou `.github/workflows/ci.yml` (GitHub).
 
 ## Déployer pour quelqu'un
 
@@ -48,6 +49,7 @@ premier `dolop une-fois` ou `docker compose up -d`, et montrer le résultat à l
 6. **Toute correction arrive avec un test** qui échoue sans elle ; les tests racontent une situation.
 7. Dépendances : modifier `pyproject.toml` puis `make verrous` ; ne jamais éditer `requirements*.txt`.
 8. Actions GitHub : toujours épinglées par empreinte de commit, avec la version en commentaire.
+   Workflow Forgejo : aucune action `uses:`, images d'outils épinglées par empreinte `@sha256:`.
 
 ## Pièges connus
 
